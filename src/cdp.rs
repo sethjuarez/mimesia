@@ -57,7 +57,9 @@ impl Session {
         b = if opts.headed {
             b.with_head()
         } else {
-            b.new_headless_mode()
+            // Not `new_headless_mode()`: it also hides scrollbars, which shifts layout
+            // against recordings taken in a normal (scrollbar-showing) tab.
+            b.with_head().arg("--headless=new").arg("--mute-audio")
         };
         if opts.intercept {
             b = b.enable_request_intercept().disable_cache();
