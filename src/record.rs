@@ -54,16 +54,24 @@ async fn bounded<T>(what: &str, f: impl Future<Output = T>) -> Result<T> {
 
 pub const STILL_CSS: &str = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}";
 
-pub async fn run(cdp: &str, tab: &str, out: &Path, idle: u64, known: &[String]) -> Result<()> {
+pub async fn run(
+    cdp: &str,
+    tab: &str,
+    out: &Path,
+    idle: u64,
+    known: &[String],
+    explore: bool,
+) -> Result<()> {
     ensure_git_ignored(out)?;
     let mut session = Session::connect(cdp).await?;
     let page = session.find_tab(tab).await?;
-    let result = record_page(
+    let result = record_page_with(
         &page,
         out,
         Duration::from_secs(idle),
         Persona::default(),
         known,
+        explore,
     )
     .await;
     session.detach();
@@ -89,10 +97,23 @@ pub async fn record_page(
     persona: Persona,
     known: &[String],
 ) -> Result<ScanReport> {
+    record_page_with(page, out, idle, persona, known, false).await
+}
+
+/// Like [`record_page`]; with `explore`, stays armed after the screenshot so the user can
+/// click through the live app (capturing route data and lazy loads) until Enter.
+pub async fn record_page_with(
+    page: &Page,
+    out: &Path,
+    idle: Duration,
+    persona: Persona,
+    known: &[String],
+    explore: bool,
+) -> Result<ScanReport> {
     if out.exists() && fs::read_dir(out)?.next().is_some() {
         bail!("{} is not empty", out.display());
     }
-    let result = record_inner(page, out, idle, persona, known).await;
+    let result = record_inner(page, out, idle, persona, known, explore).await;
     let fetch_off = bounded(
         "Fetch.disable",
         page.execute(fetch::DisableParams::default()),
@@ -184,14 +205,17 @@ async fn record_inner(
     out: &Path,
     idle: Duration,
     persona: Persona,
-    known: &[String],
+    known_ids: &[String],
+    explore: bool,
 ) -> Result<ScanReport> {
+    crate::crawl::keep_awake(page).await;
     let snap: Snapshot = page
         .evaluate(SNAPSHOT_JS)
         .await?
         .into_value()
         .context("cannot read page state")?;
-    tracing::info!(url = %snap.url, "arming");
+    // Origin only: paths, queries and fragments can carry tenant or user ids.
+    tracing::info!(origin = %snap.origin, "arming");
 
     let state = Arc::new(Mutex::new(State::default()));
     let mut paused = page.event_listener::<EventRequestPaused>().await?;
@@ -216,7 +240,7 @@ async fn record_inner(
     )
     .await?;
 
-    let listener = {
+    let listener = AbortOnDrop({
         let page = page.clone();
         let state = state.clone();
         tokio::spawn(async move {
@@ -275,34 +299,35 @@ async fn record_inner(
                 }
             }
         })
-    };
+    });
 
     page.execute(ReloadParams::builder().ignore_cache(true).build())
         .await?;
-    let started = Instant::now();
-    loop {
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        if started.elapsed() >= MIN_WAIT && state.lock().unwrap().settled(idle) {
-            break;
+    let wait_settled = |max: Duration, idle: Duration| {
+        let state = state.clone();
+        async move {
+            let started = Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                if started.elapsed() >= MIN_WAIT && state.lock().unwrap().settled(idle) {
+                    return;
+                }
+                if started.elapsed() >= max {
+                    let s = state.lock().unwrap();
+                    tracing::warn!(
+                        in_flight = s.in_flight,
+                        pending = s.pending.len(),
+                        "page did not settle; recording what we have"
+                    );
+                    return;
+                }
+            }
         }
-        if started.elapsed() >= MAX_WAIT {
-            let s = state.lock().unwrap();
-            tracing::warn!(
-                in_flight = s.in_flight,
-                pending = s.pending.len(),
-                "page did not settle; recording what we have"
-            );
-            break;
-        }
-    }
+    };
+    wait_settled(MAX_WAIT, idle).await;
 
-    // Release interception before anything else so the tab is never left paused.
-    bounded(
-        "Fetch.disable",
-        page.execute(fetch::DisableParams::default()),
-    )
-    .await??;
-    listener.abort();
+    // The reference screenshot and frames describe the start page, so take them while
+    // still armed (before any exploring).
     let png = bounded("screenshot", still_screenshot(page)).await??;
     // The viewport may have changed since the snapshot (window resized); replay must
     // match the screenshot, so measure again and insist they agree.
@@ -326,8 +351,84 @@ async fn record_inner(
     let mut frame_urls = Vec::new();
     collect_frames(&frames.result.frame_tree, &mut frame_urls, true);
 
-    let state = std::mem::take(&mut *state.lock().unwrap());
-    finalize(out, snap, state, frame_urls, png, persona, known)
+    if explore {
+        eprintln!(
+            "recording start page done; click through the LIVE tab to capture more. Press Enter here when finished."
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // A plain thread: a blocked stdin read must not hold up runtime shutdown.
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            let _ = tx.send(());
+        });
+        tokio::select! {
+            _ = rx => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        eprintln!("finishing; waiting for in-flight requests");
+        wait_settled(Duration::from_secs(15), Duration::from_secs(1)).await;
+    }
+
+    // Release interception before anything else so the tab is never left paused.
+    bounded(
+        "Fetch.disable",
+        page.execute(fetch::DisableParams::default()),
+    )
+    .await?
+    .context("Fetch.disable")?;
+    listener.0.abort();
+
+    let mut state = std::mem::take(&mut *state.lock().unwrap());
+
+    let seeds: Vec<(String, String, Vec<u8>)> = state
+        .raws
+        .iter()
+        .filter(|r| r.status == 200)
+        .filter_map(|r| {
+            let ct = r
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default();
+            Some((r.url.clone(), ct, r.body.clone()?))
+        })
+        .collect();
+    let known: HashSet<String> = state.raws.iter().map(|r| r.url.clone()).collect();
+    let crawled = match crate::crawl::crawl(page, &snap.origin, seeds, &known).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "shell crawl failed; lazy chunks may miss in replay");
+            Vec::new()
+        }
+    };
+    for (f, body) in crawled {
+        if classify(&f.url) != Class::Normal {
+            continue;
+        }
+        state.inv.crawled += 1;
+        state.raws.push(Raw {
+            method: "GET".into(),
+            url: f.url,
+            resource_type: "Crawl".into(),
+            status: 200,
+            headers: f.headers,
+            body: Some(body),
+            request_body: None,
+        });
+    }
+
+    finalize(out, snap, state, frame_urls, png, persona, known_ids)
+}
+
+/// Aborts the task when dropped, so early returns never leave a listener running.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Screenshot with animations and carets frozen.
@@ -604,9 +705,35 @@ fn finalize(
             (None, Some(b)) => Some(cap.put_blob(b)?),
             (None, None) => None,
         };
-        let req_body = r
+        // Same rules as response bodies: JSON-aware scrub (catches short values), checked,
+        // and binary bodies that name the user are dropped.
+        let req_body = match r
             .request_body
-            .map(|b| scrubber.text(&String::from_utf8_lossy(&b)).into_bytes());
+            .as_deref()
+            .map(|b| (b, std::str::from_utf8(b)))
+        {
+            Some((_, Ok(s))) => {
+                let rct = if serde_json::from_str::<serde_json::Value>(s).is_ok() {
+                    "application/json"
+                } else {
+                    "text/plain"
+                };
+                let s = scrubber.body(rct, s);
+                check("a request body", rct, &s)?;
+                Some(s.into_bytes())
+            }
+            Some((b, Err(_))) if scrubber.bytes_have_identity(b) => {
+                inv.skipped
+                    .push((url.clone(), "identity in binary request body".into()));
+                None
+            }
+            Some((b, Err(_))) => Some(b.to_vec()),
+            None => None,
+        };
+        let req_blob = match req_body.as_deref() {
+            Some(b) if !b.is_empty() => Some(cap.put_blob(b)?),
+            _ => None,
+        };
         entries.push(Entry {
             key: matchkey::exact(&r.method, &url, req_body.as_deref()),
             loose_key: matchkey::loose(&r.method, &url),
@@ -616,6 +743,7 @@ fn finalize(
             status: r.status,
             headers,
             body,
+            req_body: req_blob,
         });
     }
 

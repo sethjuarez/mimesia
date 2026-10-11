@@ -38,6 +38,10 @@ enum Command {
         /// Repeatable.
         #[arg(long = "identity", value_name = "VALUE")]
         identity: Vec<String>,
+        /// After the start page, keep recording while you click through the live tab
+        /// (route data, lazy panels); press Enter to finish.
+        #[arg(long)]
+        explore: bool,
     },
     /// Fail if a capture leaks tokens or credentials.
     Scan { capture: PathBuf },
@@ -75,7 +79,8 @@ async fn main() -> Result<()> {
             cdp,
             idle,
             identity,
-        } => mimesia::record::run(&cdp, &tab, &out, idle, &identity).await,
+            explore,
+        } => mimesia::record::run(&cdp, &tab, &out, idle, &identity, explore).await,
         Command::Scan { capture } => mimesia::scan::run(&capture),
         Command::Replay { capture, headed } => mimesia::replay::run(&capture, headed).await,
         Command::Verify { capture, threshold } => mimesia::verify::run(&capture, threshold).await,
