@@ -55,12 +55,22 @@ impl Persona {
 
     /// Unsigned JWT carrying persona claims.
     pub fn jwt(&self, aud: &str) -> String {
-        format!(
-            "{}.{}.mimesia",
-            fake_jwt_prefix(),
-            URL_SAFE_NO_PAD.encode(self.claims(aud).to_string())
-        )
+        sign(&self.claims(aud))
     }
+
+    /// MSAL `client_info`: base64url `{"uid","utid"}`.
+    pub fn client_info(&self) -> String {
+        URL_SAFE_NO_PAD.encode(json!({ "uid": self.oid, "utid": self.tid }).to_string())
+    }
+}
+
+/// Unsigned JWT with the given claims and Mimesia's marker header.
+pub fn sign(claims: &serde_json::Value) -> String {
+    format!(
+        "{}.{}.mimesia",
+        fake_jwt_prefix(),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+    )
 }
 
 pub fn fake_jwt_prefix() -> String {

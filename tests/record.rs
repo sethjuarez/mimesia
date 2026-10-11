@@ -7,26 +7,6 @@ use mimesia::cdp::{Launch, Session};
 use mimesia::persona::Persona;
 use mimesia::record::record_page;
 
-async fn signed_in_page(session: &Session, url: &str) -> chromiumoxide::Page {
-    let page = session.browser.new_page(url).await.unwrap();
-    page.wait_for_navigation().await.unwrap();
-    page.evaluate(Fixture::sign_in_js()).await.unwrap();
-    page.reload().await.unwrap();
-    for _ in 0..50 {
-        let ready: String = page
-            .evaluate("document.body.dataset.ready || ''")
-            .await
-            .unwrap()
-            .into_value()
-            .unwrap();
-        if !ready.is_empty() {
-            return page;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("fixture app never became ready");
-}
-
 fn grep_dir(dir: &std::path::Path, needles: &[&str]) -> Vec<String> {
     let mut hits = Vec::new();
     for e in walk(dir) {
@@ -121,17 +101,4 @@ async fn record_scrubs_and_excludes_login() {
     } else {
         let _ = std::fs::remove_dir_all(&tmp);
     }
-}
-
-fn tempdir() -> std::path::PathBuf {
-    let d = std::env::temp_dir().join(format!(
-        "mimesia-test-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
 }

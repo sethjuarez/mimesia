@@ -1,5 +1,6 @@
 //! Mimesia: record, replay, and verify web app shells.
 
+pub mod auth;
 pub mod cdp;
 pub mod matchkey;
 pub mod persona;

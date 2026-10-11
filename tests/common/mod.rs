@@ -9,6 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
+use mimesia::cdp::Session;
+use std::time::Duration;
+
 pub const REAL_OID: &str = "11111111-2222-3333-4444-555555555555";
 pub const REAL_TID: &str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 pub const REAL_UPN: &str = "real.person@fabrikam.com";
@@ -225,3 +228,36 @@ const APP_JS: &str = r#"(async () => {
   m.render(document.getElementById('lazy'));
   document.body.dataset.ready = '1';
 })();"#;
+
+pub async fn signed_in_page(session: &Session, url: &str) -> chromiumoxide::Page {
+    let page = session.browser.new_page(url).await.unwrap();
+    page.wait_for_navigation().await.unwrap();
+    page.evaluate(Fixture::sign_in_js()).await.unwrap();
+    page.reload().await.unwrap();
+    for _ in 0..50 {
+        let ready: String = page
+            .evaluate("document.body.dataset.ready || ''")
+            .await
+            .unwrap()
+            .into_value()
+            .unwrap();
+        if !ready.is_empty() {
+            return page;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("fixture app never became ready");
+}
+
+pub fn tempdir() -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!(
+        "mimesia-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+}

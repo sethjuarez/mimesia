@@ -333,7 +333,22 @@ fn collect_frames(t: &FrameTree, out: &mut Vec<String>, root: bool) {
     }
 }
 
-fn header_pairs(h: &impl serde::Serialize) -> Vec<(String, String)> {
+/// Request body bytes, if any.
+pub(crate) fn post_body(r: &network::Request) -> Option<Vec<u8>> {
+    r.post_data_entries.as_ref().map(|entries| {
+        let mut buf = Vec::new();
+        for e in entries {
+            if let Some(Value::String(b)) =
+                e.bytes.as_ref().and_then(|b| serde_json::to_value(b).ok())
+            {
+                buf.extend(STANDARD.decode(b).unwrap_or_default());
+            }
+        }
+        buf
+    })
+}
+
+pub(crate) fn header_pairs(h: &impl serde::Serialize) -> Vec<(String, String)> {
     match serde_json::to_value(h) {
         Ok(Value::Object(m)) => m
             .into_iter()
@@ -410,17 +425,7 @@ async fn handle(page: &Page, ev: &EventRequestPaused, state: &Mutex<State>) -> R
         return Ok(());
     }
 
-    let request_body = ev.request.post_data_entries.as_ref().map(|entries| {
-        let mut buf = Vec::new();
-        for e in entries {
-            if let Some(Value::String(b)) =
-                e.bytes.as_ref().and_then(|b| serde_json::to_value(b).ok())
-            {
-                buf.extend(STANDARD.decode(b).unwrap_or_default());
-            }
-        }
-        buf
-    });
+    let request_body = post_body(&ev.request);
 
     let (status, body) = if class == Class::Photo {
         (404, None)

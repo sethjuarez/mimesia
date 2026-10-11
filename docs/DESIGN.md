@@ -82,6 +82,22 @@ Both inject one small **bootstrap** script into the page:
 
 Service-worker publish must handle scope, CSP, and cross-origin requests. Out of scope for spike 01.
 
+CDP replay fails closed:
+
+| Request | Answer |
+|---|---|
+| Identity host / OAuth path | `auth` stub (OIDC metadata, token with persona JWTs, authorize → code redirect) |
+| Telemetry | 204 |
+| Recorded | fixture: exact key, else loose key (GET/HEAD only); repeats served in order |
+| Unrecorded preflight | synthesized CORS 204 |
+| Unrecorded same-origin subframe | blank page (MSAL redirect targets) |
+| Anything else | blocked, reported as a **miss**; `replay` exits non-zero |
+| Bypassed interception | hits Mimesia's reject proxy, reported as **escaped** |
+
+Bootstrap also parks WebSocket/EventSource (stay connecting), blocks service-worker registration, and disables WebRTC/WebTransport.
+
+Known gaps: popups/new tabs are not intercepted; bodies CDP omits from `postDataEntries` hash as empty; browser settings are not OS-level network isolation.
+
 ## Login is not recorded
 
 Arming after load is not enough on its own: reloads can trigger silent renewal. Recording **fails closed**.
