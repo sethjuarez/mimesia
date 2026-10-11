@@ -19,12 +19,12 @@ See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Status
 
-Spike 01: the CLI records one page over CDP, replays it offline, and diffs screenshots. Proven end to end on a local fixture app; the live Foundry run is next ([runbook](docs/spikes/01-foundry.md)).
+Live Foundry replays offline as a fake persona: a 25-page click-through with 0 misses and 0.029% pixel diff ([spike 01](docs/spikes/01-foundry.md), [spike 02](docs/spikes/02-foundry-clickthrough.md)).
 
 | Command | Does |
 |---|---|
 | `mimesia tabs` | list tabs in a debug-enabled browser |
-| `mimesia record` | capture one page from a signed-in tab (auth excluded) |
+| `mimesia record` | capture a signed-in tab (auth excluded); `--explore` records while you click, then crawls lazy chunks |
 | `mimesia scan` | fail if a capture leaks tokens or tenant data |
 | `mimesia replay` | serve the capture offline in a fresh browser |
 | `mimesia verify` | replay, screenshot, pixel-diff vs recording |
