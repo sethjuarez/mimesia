@@ -54,6 +54,14 @@ pub fn classify(url: &str) -> Class {
     {
         return Class::Telemetry;
     }
+    // Same-origin beacons, e.g. Foundry's `/nextgen/clientTelemetry` and
+    // `/foundry-telemetry/v2/track` (App Insights ingestion proxied).
+    if path.ends_with("/v2/track")
+        || path.ends_with("/v2.1/track")
+        || path.split('/').any(|s| TELEMETRY_SEGMENT.is_match(s))
+    {
+        return Class::Telemetry;
+    }
     if host == "graph.microsoft.com" && (path.contains("/photo/") || path.contains("/photos/")) {
         return Class::Photo;
     }
@@ -73,6 +81,9 @@ pub fn classify(url: &str) -> Class {
     }
     Class::Normal
 }
+
+static TELEMETRY_SEGMENT: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(client|[a-z0-9]+-)?telemetry$").unwrap());
 
 static PHOTO: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -108,6 +119,19 @@ mod tests {
             classify("https://westus-0.in.applicationinsights.azure.com/v2/track"),
             Class::Telemetry
         );
+        for u in [
+            "https://ai.azure.com/nextgen/clientTelemetry",
+            "https://ai.azure.com/foundry-telemetry/v2/track",
+            "https://ai.azure.com/x/v2/track",
+        ] {
+            assert_eq!(classify(u), Class::Telemetry, "{u}");
+        }
+        for u in [
+            "https://ai.azure.com/docs/telemetryGuide",
+            "https://ai.azure.com/api/v2/tracks",
+        ] {
+            assert_eq!(classify(u), Class::Normal, "{u}");
+        }
         assert_eq!(
             classify("https://graph.microsoft.com/v1.0/me/photo/$value"),
             Class::Photo

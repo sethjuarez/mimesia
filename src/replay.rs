@@ -64,6 +64,8 @@ struct Index {
     entries: Vec<Entry>,
     exact: HashMap<String, Vec<usize>>,
     loose: HashMap<String, Vec<usize>>,
+    /// Non-GET requests with a query, keyed without body.
+    rpc: HashMap<String, Vec<usize>>,
     cursor: HashMap<String, usize>,
 }
 
@@ -71,14 +73,22 @@ impl Index {
     fn new(entries: Vec<Entry>) -> Self {
         let mut exact: HashMap<String, Vec<usize>> = HashMap::new();
         let mut loose: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut rpc: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, e) in entries.iter().enumerate() {
             exact.entry(e.key.clone()).or_default().push(i);
             loose.entry(e.loose_key.clone()).or_default().push(i);
+            if !matches!(e.method.as_str(), "GET" | "HEAD") {
+                let k = matchkey::exact(&e.method, &e.url, None);
+                if k.contains('?') {
+                    rpc.entry(k).or_default().push(i);
+                }
+            }
         }
         Self {
             entries,
             exact,
             loose,
+            rpc,
             cursor: HashMap::new(),
         }
     }
@@ -91,6 +101,13 @@ impl Index {
                 let loose = matchkey::loose(method, url);
                 let l = self.loose.get(&loose)?;
                 (format!("~{loose}"), l)
+            }
+            // RPC-style POSTs (`/api/query?getFooResolver`): the query names the call, the body
+            // carries volatile args. Fall back to the call name, ignoring the body.
+            None if url.contains('?') => {
+                let rpc = matchkey::exact(method, url, None);
+                let l = self.rpc.get(&rpc)?;
+                (format!("@{rpc}"), l)
             }
             None => return None,
         };
@@ -575,5 +592,25 @@ mod tests {
             ix.lookup("POST", "https://a/x?id=2", None).is_none(),
             "no loose POST"
         );
+    }
+
+    #[test]
+    fn rpc_post_ignores_body_but_not_name() {
+        let mut ix = Index::new(vec![
+            entry("POST", "https://a/q?getA", "a1"),
+            entry("POST", "https://a/q?getA", "a2"),
+        ]);
+        let mut next =
+            |u: &str, b: &[u8]| ix.lookup("POST", u, Some(b)).and_then(|e| e.body.clone());
+        assert_eq!(
+            next("https://a/q?getA", b"{\"x\":1}").as_deref(),
+            Some("a1")
+        );
+        assert_eq!(
+            next("https://a/q?getA", b"{\"x\":2}").as_deref(),
+            Some("a2")
+        );
+        assert_eq!(next("https://a/q?getB", b"{}"), None);
+        assert_eq!(next("https://a/q", b"{}"), None);
     }
 }
