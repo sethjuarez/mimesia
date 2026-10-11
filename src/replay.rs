@@ -5,7 +5,7 @@
 //! 204, and everything else is served from recorded fixtures. A bootstrap script pins the clock,
 //! seeds the fake MSAL session, and parks service workers, WebSockets, and EventSource.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -52,6 +52,8 @@ pub struct Stats {
     pub telemetry_stubbed: usize,
     pub preflight_stubbed: usize,
     pub blank_frames: usize,
+    /// `METHOD url (differs: fields)` of requests served the closest recorded body.
+    pub near: Vec<String>,
     /// `METHOD url` of requests with no fixture; these failed.
     pub misses: Vec<String>,
     /// First line of requests that bypassed interception and hit the reject proxy.
@@ -64,13 +66,23 @@ struct Index {
     entries: Vec<Entry>,
     exact: HashMap<String, Vec<usize>>,
     loose: HashMap<String, Vec<usize>>,
-    /// Non-GET requests with a query, keyed without body.
+    /// Non-GET requests keyed by method + URL, without body.
     rpc: HashMap<String, Vec<usize>>,
+    /// JSON leaves of each entry's recorded request body.
+    leaves: Vec<Option<BTreeMap<String, String>>>,
     cursor: HashMap<String, usize>,
 }
 
+/// How a fixture was found.
+enum Found<'a> {
+    Hit(&'a Entry),
+    /// Same call, different body: the closest recorded body. Holds the differing field paths.
+    Near(&'a Entry, Vec<String>),
+}
+
 impl Index {
-    fn new(entries: Vec<Entry>) -> Self {
+    /// `bodies[i]` is the recorded request body of `entries[i]`, if any.
+    fn new(entries: Vec<Entry>, bodies: Vec<Option<Vec<u8>>>) -> Self {
         let mut exact: HashMap<String, Vec<usize>> = HashMap::new();
         let mut loose: HashMap<String, Vec<usize>> = HashMap::new();
         let mut rpc: HashMap<String, Vec<usize>> = HashMap::new();
@@ -78,43 +90,75 @@ impl Index {
             exact.entry(e.key.clone()).or_default().push(i);
             loose.entry(e.loose_key.clone()).or_default().push(i);
             if !matches!(e.method.as_str(), "GET" | "HEAD") {
-                let k = matchkey::exact(&e.method, &e.url, None);
-                if k.contains('?') {
-                    rpc.entry(k).or_default().push(i);
-                }
+                rpc.entry(matchkey::exact(&e.method, &e.url, None))
+                    .or_default()
+                    .push(i);
             }
         }
+        let mut leaves: Vec<_> = bodies
+            .iter()
+            .map(|b| b.as_deref().and_then(matchkey::leaves))
+            .collect();
+        leaves.resize(entries.len(), None);
         Self {
             entries,
             exact,
             loose,
             rpc,
+            leaves,
             cursor: HashMap::new(),
         }
     }
 
-    fn lookup(&mut self, method: &str, url: &str, body: Option<&[u8]>) -> Option<&Entry> {
+    fn lookup(&mut self, method: &str, url: &str, body: Option<&[u8]>) -> Option<Found<'_>> {
         let exact = matchkey::exact(method, url, body);
         let (key, list) = match self.exact.get(&exact) {
-            Some(l) => (exact, l),
+            Some(l) => (exact, l.clone()),
             None if matches!(method, "GET" | "HEAD") => {
                 let loose = matchkey::loose(method, url);
                 let l = self.loose.get(&loose)?;
-                (format!("~{loose}"), l)
+                (format!("~{loose}"), l.clone())
             }
-            // RPC-style POSTs (`/api/query?getFooResolver`): the query names the call, the body
-            // carries volatile args. Fall back to the call name, ignoring the body.
-            None if url.contains('?') => {
-                let rpc = matchkey::exact(method, url, None);
-                let l = self.rpc.get(&rpc)?;
-                (format!("@{rpc}"), l)
-            }
-            None => return None,
+            // Same method + URL, different body (RPC args, volatile fields): serve the
+            // recorded call whose JSON body shares the most fields.
+            None => return self.near(method, url, body),
         };
         let n = self.cursor.entry(key).or_insert(0);
         let i = list[(*n).min(list.len() - 1)];
         *n += 1;
-        Some(&self.entries[i])
+        Some(Found::Hit(&self.entries[i]))
+    }
+
+    fn near(&mut self, method: &str, url: &str, body: Option<&[u8]>) -> Option<Found<'_>> {
+        let key = matchkey::exact(method, url, None);
+        let list = self.rpc.get(&key)?;
+        let want = body.and_then(matchkey::leaves);
+        let score = |i: usize| match (&want, &self.leaves[i]) {
+            (Some(w), Some(h)) => w.iter().filter(|(k, v)| h.get(*k) == Some(v)).count(),
+            _ => 0,
+        };
+        let best = list.iter().map(|&i| score(i)).max()?;
+        let ties: Vec<usize> = list.iter().copied().filter(|&i| score(i) == best).collect();
+        let n = self.cursor.entry(format!("@{key}#{best}")).or_insert(0);
+        let i = ties[(*n).min(ties.len() - 1)];
+        *n += 1;
+        let differs = match (&want, &self.leaves[i]) {
+            (Some(w), Some(h)) => {
+                let mut d: Vec<String> = w
+                    .iter()
+                    .filter(|(k, v)| h.get(*k) != Some(v))
+                    .map(|(k, _)| k.clone())
+                    .chain(h.keys().filter(|k| !w.contains_key(*k)).cloned())
+                    // Name the set, never its members or id-like keys (no ids in logs).
+                    .map(|k| matchkey::display_path(&k))
+                    .collect();
+                d.sort();
+                d.dedup();
+                d
+            }
+            _ => vec!["<body>".into()],
+        };
+        Some(Found::Near(&self.entries[i], differs))
     }
 }
 
@@ -144,7 +188,12 @@ impl Replay {
         let cap = Capture::new(capture);
         require_clean(&cap)?;
         let manifest = cap.manifest()?;
-        let index = Index::new(cap.entries()?);
+        let entries = cap.entries()?;
+        let bodies = entries
+            .iter()
+            .map(|e| e.req_body.as_deref().map(|h| cap.blob(h)).transpose())
+            .collect::<Result<Vec<_>>>()?;
+        let index = Index::new(entries, bodies);
         let escaped = Arc::new(Mutex::new(Vec::new()));
         let (proxy_addr, proxy) = reject_proxy(escaped.clone()).await?;
 
@@ -170,7 +219,7 @@ impl Replay {
             .await?;
         page.execute(SetCacheDisabledParams::new(true)).await?;
         page.execute(AddScriptToEvaluateOnNewDocumentParams::new(bootstrap(
-            &manifest,
+            &manifest, headed,
         )?))
         .await?;
         if !manifest.user_agent.is_empty() {
@@ -334,7 +383,20 @@ fn decide(ev: &EventRequestPaused, s: &mut State) -> Result<Option<Reply>> {
         }
         _ => {}
     }
-    if let Some(e) = s.index.lookup(method, url, body.as_deref()) {
+    if let Some(found) = s.index.lookup(method, url, body.as_deref()) {
+        let e = match found {
+            Found::Hit(e) => e,
+            Found::Near(e, differs) => {
+                let shown = format!(
+                    "{method} {} (differs: {})",
+                    redact_query(url),
+                    differs.join(", ")
+                );
+                tracing::info!("near: {shown}");
+                s.stats.near.push(shown);
+                e
+            }
+        };
         let (status, headers, blob) = (e.status, e.headers.clone(), e.body.clone());
         let bytes = match blob {
             Some(h) => s.cap.blob(&h)?,
@@ -374,8 +436,27 @@ fn decide(ev: &EventRequestPaused, s: &mut State) -> Result<Option<Reply>> {
             b"<!doctype html><html><body></body></html>".to_vec(),
         )));
     }
-    s.stats.misses.push(format!("{method} {url}"));
+    let shown = format!("{method} {}", redact_query(url));
+    tracing::warn!("miss: {shown}");
+    s.stats.misses.push(shown);
     Ok(None)
+}
+
+/// A URL with query values hidden (keys kept), so miss reports never echo secrets or ids.
+fn redact_query(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(mut u) => {
+            let keys: Vec<String> = u.query_pairs().map(|(k, _)| k.into_owned()).collect();
+            u.set_query(None);
+            u.set_fragment(None);
+            if keys.is_empty() {
+                u.to_string()
+            } else {
+                format!("{u}?{}", keys.join("&"))
+            }
+        }
+        Err(_) => "<unparseable url>".to_string(),
+    }
 }
 
 fn cors_any() -> Vec<(String, String)> {
@@ -446,11 +527,12 @@ async fn reject_proxy(
 }
 
 /// Script injected into every document before page scripts run.
-fn bootstrap(m: &Manifest) -> Result<String> {
+fn bootstrap(m: &Manifest, badge: bool) -> Result<String> {
     let cfg = json!({
         "now": m.captured_at_ms,
         "origin": m.origin,
         "storage": m.storage,
+        "badge": badge,
     });
     Ok(BOOTSTRAP.replace("__MIMESIA_CFG__", &serde_json::to_string(&cfg)?))
 }
@@ -519,30 +601,54 @@ const BOOTSTRAP: &str = r#"(() => {
       window[name] = function () { throw new DOMException(name + ' disabled by mimesia', 'NotSupportedError'); };
     }
   }
+
+  // Interactive replays are labelled so they are never mistaken for the live site.
+  if (cfg.badge && window === window.top) {
+    const mark = () => {
+      if (!document.title.startsWith('[REPLAY] ')) document.title = '[REPLAY] ' + document.title;
+      if (document.body && !document.getElementById('__mimesia_badge')) {
+        const b = document.createElement('div');
+        b.id = '__mimesia_badge';
+        b.textContent = 'MIMESIA REPLAY';
+        b.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:2147483647;pointer-events:none;' +
+          'background:#c50f1f;color:#fff;font:600 11px/1 system-ui,sans-serif;letter-spacing:.06em;' +
+          'padding:5px 8px;border-radius:4px;opacity:.9';
+        document.body.appendChild(b);
+      }
+    };
+    setInterval(mark, 500);
+  }
 })();"#;
 
 pub async fn run(capture: &Path, headed: bool) -> Result<()> {
     let replay = Replay::start(capture, headed).await?;
     replay.settle().await?;
+    if headed {
+        println!(
+            "replaying; devtools {}; press Ctrl-C to stop",
+            replay.session.browser.websocket_address()
+        );
+        tokio::signal::ctrl_c().await?;
+    }
     let s = replay.stats();
     println!(
-        "replayed: {} hits, {} identity stubbed, {} telemetry stubbed, {} preflights, {} blank frames, {} misses",
+        "replayed: {} hits ({} near), {} identity stubbed, {} telemetry stubbed, {} preflights, {} blank frames, {} misses",
         s.hits,
+        s.near.len(),
         s.identity_stubbed,
         s.telemetry_stubbed,
         s.preflight_stubbed,
         s.blank_frames,
         s.misses.len()
     );
+    for n in &s.near {
+        println!("NEAR {n}");
+    }
     for m in &s.misses {
         println!("MISS {m}");
     }
     for e in &s.escaped {
         println!("ESCAPED {e}");
-    }
-    if headed {
-        println!("replaying; press Ctrl-C to stop");
-        tokio::signal::ctrl_c().await?;
     }
     replay.close().await;
     if !s.escaped.is_empty() {
@@ -571,23 +677,33 @@ mod tests {
             status: 200,
             headers: Vec::new(),
             body: Some(body.into()),
+            req_body: None,
+        }
+    }
+
+    fn served(f: Option<Found<'_>>) -> Option<String> {
+        match f? {
+            Found::Hit(e) | Found::Near(e, _) => e.body.clone(),
         }
     }
 
     #[test]
     fn exact_then_loose_then_sequence() {
-        let mut ix = Index::new(vec![
-            entry("GET", "https://a/x?q=1", "one"),
-            entry("GET", "https://a/x?q=1", "two"),
-            entry("GET", "https://a/y?q=1", "why"),
-        ]);
-        let mut next = |u: &str| ix.lookup("GET", u, None).and_then(|e| e.body.clone());
+        let mut ix = Index::new(
+            vec![
+                entry("GET", "https://a/x?q=1", "one"),
+                entry("GET", "https://a/x?q=1", "two"),
+                entry("GET", "https://a/y?q=1", "why"),
+            ],
+            vec![],
+        );
+        let mut next = |u: &str| served(ix.lookup("GET", u, None));
         assert_eq!(next("https://a/x?q=1").as_deref(), Some("one"));
         assert_eq!(next("https://a/x?q=1").as_deref(), Some("two"));
         assert_eq!(next("https://a/x?q=1").as_deref(), Some("two"));
         assert_eq!(next("https://a/y?q=2").as_deref(), Some("why"));
         assert_eq!(next("https://a/z").as_deref(), None);
-        let mut ix = Index::new(vec![entry("POST", "https://a/x", "p")]);
+        let mut ix = Index::new(vec![entry("POST", "https://a/x", "p")], vec![]);
         assert!(
             ix.lookup("POST", "https://a/x?id=2", None).is_none(),
             "no loose POST"
@@ -596,12 +712,14 @@ mod tests {
 
     #[test]
     fn rpc_post_ignores_body_but_not_name() {
-        let mut ix = Index::new(vec![
-            entry("POST", "https://a/q?getA", "a1"),
-            entry("POST", "https://a/q?getA", "a2"),
-        ]);
-        let mut next =
-            |u: &str, b: &[u8]| ix.lookup("POST", u, Some(b)).and_then(|e| e.body.clone());
+        let mut ix = Index::new(
+            vec![
+                entry("POST", "https://a/q?getA", "a1"),
+                entry("POST", "https://a/q?getA", "a2"),
+            ],
+            vec![],
+        );
+        let mut next = |u: &str, b: &[u8]| served(ix.lookup("POST", u, Some(b)));
         assert_eq!(
             next("https://a/q?getA", b"{\"x\":1}").as_deref(),
             Some("a1")
@@ -612,5 +730,62 @@ mod tests {
         );
         assert_eq!(next("https://a/q?getB", b"{}"), None);
         assert_eq!(next("https://a/q", b"{}"), None);
+    }
+
+    #[test]
+    fn near_post_picks_closest_body_and_names_fields() {
+        let bodies = vec![
+            Some(br#"{"agent":"a","version":"1","page":1}"#.to_vec()),
+            Some(br#"{"agent":"b","version":"1","page":1}"#.to_vec()),
+        ];
+        let mut ix = Index::new(
+            vec![
+                entry("POST", "https://a/api/details", "A"),
+                entry("POST", "https://a/api/details", "B"),
+            ],
+            bodies,
+        );
+        match ix.lookup(
+            "POST",
+            "https://a/api/details",
+            Some(br#"{"agent":"b","version":"2","page":1}"#),
+        ) {
+            Some(Found::Near(e, d)) => {
+                assert_eq!(e.body.as_deref(), Some("B"));
+                assert_eq!(d, vec!["$.version".to_string()]);
+            }
+            _ => panic!("expected near match"),
+        }
+        assert!(
+            ix.lookup("PUT", "https://a/api/details", Some(b"{}"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn near_treats_scalar_arrays_as_sets_and_hides_members() {
+        let bodies = vec![
+            Some(br#"{"ids":["b","c","d"]}"#.to_vec()),
+            Some(br#"{"ids":["e","f","g"]}"#.to_vec()),
+        ];
+        let mut ix = Index::new(
+            vec![
+                entry("POST", "https://a/api/who", "BCD"),
+                entry("POST", "https://a/api/who", "EFG"),
+            ],
+            bodies,
+        );
+        // A batch shifted by one element still lands on the overlapping recording.
+        match ix.lookup(
+            "POST",
+            "https://a/api/who",
+            Some(br#"{"ids":["a","b","c"]}"#),
+        ) {
+            Some(Found::Near(e, d)) => {
+                assert_eq!(e.body.as_deref(), Some("BCD"));
+                assert_eq!(d, vec!["$.ids[]".to_string()]);
+            }
+            _ => panic!("expected near match"),
+        }
     }
 }

@@ -71,6 +71,9 @@ pub struct Entry {
     pub headers: Vec<(String, String)>,
     /// sha256 of the body in `blobs/`, if any.
     pub body: Option<String>,
+    /// sha256 of the scrubbed request body in `blobs/`, if any. Used for nearest-body matching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub req_body: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -85,6 +88,9 @@ pub struct Inventory {
     pub frames: Vec<String>,
     /// Requests seen but not stored, with reason.
     pub skipped: Vec<(String, String)>,
+    /// Static assets fetched by the shell crawl (not loaded by the page itself).
+    #[serde(default)]
+    pub crawled: usize,
 }
 
 pub struct Capture {

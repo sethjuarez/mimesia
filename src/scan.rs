@@ -39,10 +39,10 @@ pub fn scan(cap: &Capture) -> Result<ScanReport> {
             }
             findings.extend(leaks(v, &format!("{at}.headers")));
         }
-        if let Some(h) = &e.body
-            && !blobs.contains(h)
-        {
-            bail!("{at} references missing blob {h}");
+        for h in [&e.body, &e.req_body].into_iter().flatten() {
+            if !blobs.contains(h) {
+                bail!("{at} references missing blob {h}");
+            }
         }
     }
     // Every blob, whatever its declared type: a mislabeled body must not slip through.

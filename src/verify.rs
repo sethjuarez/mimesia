@@ -76,14 +76,18 @@ pub async fn verify(capture: &Path, threshold: f64) -> Result<Report> {
 pub async fn run(capture: &Path, threshold: f64) -> Result<()> {
     let r = verify(capture, threshold).await?;
     println!(
-        "{}: {:.3}% pixels differ (threshold {:.3}%), {} hits, {} misses, {} escaped",
+        "{}: {:.3}% pixels differ (threshold {:.3}%), {} hits ({} near), {} misses, {} escaped",
         if r.pass { "PASS" } else { "FAIL" },
         r.diff_ratio * 100.0,
         r.threshold * 100.0,
         r.stats.hits,
+        r.stats.near.len(),
         r.stats.misses.len(),
         r.stats.escaped.len()
     );
+    for n in &r.stats.near {
+        println!("NEAR {n}");
+    }
     for m in &r.stats.misses {
         println!("MISS {m}");
     }
