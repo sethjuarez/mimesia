@@ -23,9 +23,15 @@ async fn replay_runs_offline_with_fake_session() {
     let page = signed_in_page(&session, &format!("{}/", fx.app)).await;
     let tmp = tempdir();
     let out = tmp.join("cap");
-    let report = record_page(&page, &out, Duration::from_millis(500), Persona::default())
-        .await
-        .unwrap();
+    let report = record_page(
+        &page,
+        &out,
+        Duration::from_millis(500),
+        Persona::default(),
+        &[],
+    )
+    .await
+    .unwrap();
     session.close().await;
     // The origin is gone: replay must be fully offline.
     fx.stop();

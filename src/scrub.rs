@@ -71,29 +71,97 @@ pub fn is_script_or_style(content_type: &str) -> bool {
 /// Real identity values (from the live MSAL cache) and what replaces them.
 #[derive(Debug, Default, Clone)]
 pub struct IdentityMap {
-    pairs: Vec<(String, String)>,
+    /// (real, fake, trusted). Untrusted values are scrubbed but prove nothing.
+    pairs: Vec<(String, String, bool)>,
+    /// First/last name words: replaced case-sensitively, in text only, at any length.
+    parts: Vec<(String, String)>,
 }
 
 /// Shorter values are only replaced where they are a whole JSON string.
 const MIN_FREE_TEXT: usize = 4;
 
 impl IdentityMap {
+    /// A real value known to belong to the signed-in user.
     pub fn add(&mut self, real: &str, fake: &str) {
-        let real = real.trim();
-        if real.len() < 2 || real.eq_ignore_ascii_case(fake) {
-            return;
-        }
-        if !self.pairs.iter().any(|(r, _)| r.eq_ignore_ascii_case(real)) {
-            self.pairs.push((real.to_string(), fake.to_string()));
+        if self.add_weak(real, fake)
+            && let Some(p) = self
+                .pairs
+                .iter_mut()
+                .find(|(r, _, _)| r.eq_ignore_ascii_case(real.trim()))
+        {
+            p.2 = true;
         }
     }
 
+    /// A value to scrub that only probably belongs to the user; it never satisfies
+    /// `has_fake`. Returns whether the value is usable.
+    pub fn add_weak(&mut self, real: &str, fake: &str) -> bool {
+        let real = real.trim();
+        if real.len() < 2 || real.eq_ignore_ascii_case(fake) {
+            return false;
+        }
+        if !self
+            .pairs
+            .iter()
+            .any(|(r, _, _)| r.eq_ignore_ascii_case(real))
+        {
+            self.pairs.push((real.to_string(), fake.to_string(), false));
+        }
+        true
+    }
+
     pub fn reals(&self) -> impl Iterator<Item = &str> {
-        self.pairs.iter().map(|(r, _)| r.as_str())
+        self.pairs.iter().map(|(r, _, _)| r.as_str())
     }
 
     pub fn is_empty(&self) -> bool {
         self.pairs.is_empty()
+    }
+
+    /// Whether a trusted real value maps to `fake`.
+    pub fn has_fake(&self, fake: &str) -> bool {
+        self.pairs.iter().any(|(_, f, t)| *t && f == fake)
+    }
+
+    /// A display name, plus its first and last words (apps often greet by first name).
+    pub fn add_name(&mut self, real: &str, p: &Persona) {
+        self.add(real, &p.name);
+        let words: Vec<&str> = real.split_whitespace().collect();
+        if words.len() > 1 {
+            let (first, last) = p.name_parts();
+            for (r, f) in [(words[0], first), (words[words.len() - 1], last)] {
+                if r != f && !self.parts.iter().any(|(x, _)| x == r) {
+                    self.parts.push((r.to_string(), f.to_string()));
+                }
+            }
+        }
+    }
+
+    /// A UPN or email, plus its local part (apps key storage and paths by alias).
+    pub fn add_upn(&mut self, real: &str, p: &Persona) {
+        self.add(real, &p.upn);
+        if let Some((alias, _)) = real.split_once('@') {
+            self.add(alias, p.alias());
+        }
+    }
+
+    fn add_upn_weak(&mut self, real: &str, p: &Persona) {
+        self.add_weak(real, &p.upn);
+        if let Some((alias, _)) = real.split_once('@') {
+            self.add_weak(alias, p.alias());
+        }
+    }
+
+    /// Route a free-form `--identity` value: emails are UPNs, multi-word values names,
+    /// single words aliases/handles.
+    pub fn add_given(&mut self, real: &str, p: &Persona) {
+        if real.contains('@') {
+            self.add_upn(real, p);
+        } else if real.trim().contains(char::is_whitespace) {
+            self.add_name(real, p);
+        } else {
+            self.add(real, p.alias());
+        }
     }
 
     /// Learn real identity values from MSAL account / idToken claims JSON.
@@ -113,19 +181,67 @@ impl IdentityMap {
             ("realm", &p.tid),
             ("tenantId", &p.tid),
             ("tid", &p.tid),
-            ("username", &p.upn),
-            ("upn", &p.upn),
-            ("preferred_username", &p.upn),
-            ("unique_name", &p.upn),
-            ("email", &p.upn),
-            ("name", &p.name),
         ] {
             if let Some(real) = s(k) {
                 self.add(real, fake);
             }
         }
+        for k in [
+            "username",
+            "upn",
+            "preferred_username",
+            "unique_name",
+            "email",
+        ] {
+            if let Some(real) = s(k) {
+                self.add_upn(real, p);
+            }
+        }
+        if let Some(real) = s("name") {
+            self.add_name(real, p);
+        }
         if let Some(c) = v.get("idTokenClaims") {
             self.learn_from_msal(c, p);
+        }
+    }
+
+    /// Learn from arbitrary API JSON: ARM `systemData` user fields (weak: may be a
+    /// colleague, so scrubbed but never trusted), and name/email
+    /// fields of any object that also holds an already-learned oid or UPN.
+    pub fn learn_from_json(&mut self, v: &Value, p: &Persona) {
+        match v {
+            Value::Array(a) => a.iter().for_each(|x| self.learn_from_json(x, p)),
+            Value::Object(o) => {
+                let s = |k: &str| o.get(k).and_then(Value::as_str);
+                for by in ["createdBy", "lastModifiedBy"] {
+                    if s(&format!("{by}Type")) == Some("User")
+                        && let Some(real) = s(by).filter(|r| r.contains('@'))
+                    {
+                        self.add_upn_weak(real, p);
+                    }
+                }
+                let owns = ["id", "oid", "objectId", "userId", "localAccountId"]
+                    .into_iter()
+                    .chain(["userPrincipalName", "upn", "mail", "email"])
+                    .filter_map(&s)
+                    .any(|x| {
+                        self.pairs.iter().any(|(r, f, t)| {
+                            *t && r.eq_ignore_ascii_case(x.trim()) && (*f == p.oid || *f == p.upn)
+                        })
+                    });
+                if owns {
+                    for k in ["userPrincipalName", "upn", "mail", "email"] {
+                        if let Some(real) = s(k).filter(|r| r.contains('@')) {
+                            self.add_upn(real, p);
+                        }
+                    }
+                    if let Some(real) = s("displayName") {
+                        self.add_name(real, p);
+                    }
+                }
+                o.values().for_each(|x| self.learn_from_json(x, p));
+            }
+            _ => {}
         }
     }
 
@@ -149,11 +265,32 @@ impl IdentityMap {
         )
     }
 
+    fn parts_regex(&self) -> Option<Regex> {
+        let mut parts: Vec<&str> = self.parts.iter().map(|(r, _)| r.as_str()).collect();
+        if parts.is_empty() {
+            return None;
+        }
+        parts.sort_by_key(|r| std::cmp::Reverse(r.len()));
+        let alt = parts
+            .iter()
+            .map(|r| regex::escape(r))
+            .collect::<Vec<_>>()
+            .join("|");
+        Some(Regex::new(&format!(r"\b(?:{alt})\b")).unwrap())
+    }
+
+    fn part_fake(&self, real: &str) -> &str {
+        self.parts
+            .iter()
+            .find(|(r, _)| r == real)
+            .map_or(REDACTED, |(_, f)| f.as_str())
+    }
+
     fn fake_for(&self, real: &str) -> Option<&str> {
         self.pairs
             .iter()
-            .find(|(r, _)| r.eq_ignore_ascii_case(real.trim()))
-            .map(|(_, f)| f.as_str())
+            .find(|(r, _, _)| r.eq_ignore_ascii_case(real.trim()))
+            .map(|(_, f, _)| f.as_str())
     }
 }
 
@@ -171,6 +308,8 @@ pub struct Scrubber {
     text_re: Option<Regex>,
     /// For scripts and styles: distinctive values only, so code is never corrupted.
     code_re: Option<Regex>,
+    /// Name words, case-sensitive, for text only.
+    part_re: Option<Regex>,
     fake_jwt: String,
 }
 
@@ -178,12 +317,14 @@ impl Scrubber {
     pub fn new(persona: Persona, ids: IdentityMap) -> Self {
         let text_re = ids.regex(|r| r.len() >= MIN_FREE_TEXT);
         let code_re = ids.regex(distinctive);
+        let part_re = ids.parts_regex();
         let fake_jwt = persona.jwt("mimesia");
         Self {
             persona,
             ids,
             text_re,
             code_re,
+            part_re,
             fake_jwt,
         }
     }
@@ -239,7 +380,22 @@ impl Scrubber {
 
     /// Scrub credentials and identity values from free text.
     pub fn text(&self, s: &str) -> String {
-        self.ids_with(&self.text_re, self.credentials(s))
+        let s = self.credentials(s);
+        // Name words first, so a surname that equals the alias still reads as a name.
+        let s = match &self.part_re {
+            Some(re) => re
+                .replace_all(&s, |c: &Captures| self.ids.part_fake(&c[0]).to_string())
+                .into_owned(),
+            None => s,
+        };
+        self.ids_with(&self.text_re, s)
+    }
+
+    fn text_has_identity(&self, s: &str) -> bool {
+        [&self.text_re, &self.part_re]
+            .into_iter()
+            .flatten()
+            .any(|r| r.is_match(s))
     }
 
     /// Scrub a body by content type. Scripts/styles only get distinctive identity values
@@ -298,19 +454,16 @@ impl Scrubber {
         {
             return self.json_has_identity(&v);
         }
-        self.text_re.as_ref().is_some_and(|r| r.is_match(s))
+        self.text_has_identity(s)
     }
 
     fn json_has_identity(&self, v: &Value) -> bool {
         match v {
-            Value::String(s) => {
-                self.ids.fake_for(s).is_some()
-                    || self.text_re.as_ref().is_some_and(|r| r.is_match(s))
-            }
+            Value::String(s) => self.ids.fake_for(s).is_some() || self.text_has_identity(s),
             Value::Array(a) => a.iter().any(|x| self.json_has_identity(x)),
-            Value::Object(o) => o.iter().any(|(k, x)| {
-                self.text_re.as_ref().is_some_and(|r| r.is_match(k)) || self.json_has_identity(x)
-            }),
+            Value::Object(o) => o
+                .iter()
+                .any(|(k, x)| self.text_has_identity(k) || self.json_has_identity(x)),
             _ => false,
         }
     }
@@ -429,6 +582,75 @@ mod tests {
             &Persona::default(),
         );
         Scrubber::new(Persona::default(), ids)
+    }
+
+    #[test]
+    fn learns_from_api_json() {
+        let p = Persona::default();
+        let mut ids = IdentityMap::default();
+        ids.add("11111111-2222-3333-4444-555555555555", &p.oid);
+        let v = serde_json::json!({
+            "systemData": {"createdBy": "realp@fabrikam.com", "createdByType": "User"},
+            "other": {"createdBy": "svc@fabrikam.com", "createdByType": "Application"},
+            "assignment": {"principalId": "11111111-2222-3333-4444-555555555555", "name": "proj-1"},
+            "user": {"objectId": "11111111-2222-3333-4444-555555555555", "displayName": "Real Person"},
+        });
+        ids.learn_from_json(&v, &p);
+        // ARM creators are scrubbed but may be colleagues, so they prove nothing.
+        assert!(ids.has_fake(&p.name) && !ids.has_fake(&p.upn));
+        let s = Scrubber::new(p.clone(), ids);
+        let out = s.text("Welcome, Real Person / Hi Real / realp@fabrikam.com / azureAI.realp.x");
+        assert_eq!(
+            out,
+            "Welcome, Demo User / Hi Demo / demo.user@contoso.com / azureAI.demo.user.x"
+        );
+        assert_eq!(s.text("svc@fabrikam.com proj-1"), "svc@fabrikam.com proj-1");
+    }
+
+    #[test]
+    fn weak_upn_does_not_anchor_user_objects() {
+        let p = Persona::default();
+        let mut ids = IdentityMap::default();
+        ids.learn_from_json(
+            &serde_json::json!([
+                {"createdBy": "colleague@fabrikam.com", "createdByType": "User"},
+                {"mail": "colleague@fabrikam.com", "displayName": "Col League"},
+            ]),
+            &p,
+        );
+        assert!(!ids.has_fake(&p.name));
+    }
+
+    #[test]
+    fn short_name_parts_scrubbed_in_text_only() {
+        let p = Persona::default();
+        let mut ids = IdentityMap::default();
+        ids.add_name("Li Xu", &p);
+        let s = Scrubber::new(p, ids);
+        let html = "<h1>Welcome, Li</h1><p>Xu</p><p>Lima, Lisbon</p>";
+        let out = s.body("text/html", html);
+        assert_eq!(out, "<h1>Welcome, Demo</h1><p>User</p><p>Lima, Lisbon</p>");
+        assert!(s.identity_left("text/html", html));
+        assert!(!s.identity_left("text/html", &out));
+        // Case-sensitive, and never inside scripts.
+        assert_eq!(s.text("li, xu"), "li, xu");
+        assert_eq!(s.body("application/javascript", "var Li=1"), "var Li=1");
+        assert_eq!(
+            s.body("application/json", r#"{"n":"Li"}"#),
+            r#"{"n":"Demo"}"#
+        );
+    }
+
+    #[test]
+    fn given_identity_routes_by_shape() {
+        let p = Persona::default();
+        let mut ids = IdentityMap::default();
+        ids.add_given("Real Person", &p);
+        ids.add_given("real.person@fabrikam.com", &p);
+        ids.add_given("realhandle", &p);
+        assert!(ids.has_fake(&p.name) && ids.has_fake(&p.upn));
+        let s = Scrubber::new(p, ids);
+        assert_eq!(s.text("img-realhandle-1"), "img-demo.user-1");
     }
 
     #[test]

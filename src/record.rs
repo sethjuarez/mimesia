@@ -54,11 +54,18 @@ async fn bounded<T>(what: &str, f: impl Future<Output = T>) -> Result<T> {
 
 pub const STILL_CSS: &str = "*,*::before,*::after{animation:none!important;transition:none!important;caret-color:transparent!important}";
 
-pub async fn run(cdp: &str, tab: &str, out: &Path, idle: u64) -> Result<()> {
+pub async fn run(cdp: &str, tab: &str, out: &Path, idle: u64, known: &[String]) -> Result<()> {
     ensure_git_ignored(out)?;
     let mut session = Session::connect(cdp).await?;
     let page = session.find_tab(tab).await?;
-    let result = record_page(&page, out, Duration::from_secs(idle), Persona::default()).await;
+    let result = record_page(
+        &page,
+        out,
+        Duration::from_secs(idle),
+        Persona::default(),
+        known,
+    )
+    .await;
     session.detach();
     let report = result?;
     for f in &report.findings {
@@ -80,11 +87,12 @@ pub async fn record_page(
     out: &Path,
     idle: Duration,
     persona: Persona,
+    known: &[String],
 ) -> Result<ScanReport> {
     if out.exists() && fs::read_dir(out)?.next().is_some() {
         bail!("{} is not empty", out.display());
     }
-    let result = record_inner(page, out, idle, persona).await;
+    let result = record_inner(page, out, idle, persona, known).await;
     let fetch_off = bounded(
         "Fetch.disable",
         page.execute(fetch::DisableParams::default()),
@@ -176,6 +184,7 @@ async fn record_inner(
     out: &Path,
     idle: Duration,
     persona: Persona,
+    known: &[String],
 ) -> Result<ScanReport> {
     let snap: Snapshot = page
         .evaluate(SNAPSHOT_JS)
@@ -295,13 +304,30 @@ async fn record_inner(
     .await??;
     listener.abort();
     let png = bounded("screenshot", still_screenshot(page)).await??;
+    // The viewport may have changed since the snapshot (window resized); replay must
+    // match the screenshot, so measure again and insist they agree.
+    let (w, h, dpr): (u32, u32, f64) = page
+        .evaluate("[innerWidth, innerHeight, devicePixelRatio]")
+        .await?
+        .into_value()?;
+    let (pw, ph) = image::load_from_memory(&png)
+        .map(|i| (i.width(), i.height()))
+        .context("decode screenshot")?;
+    let scaled = |v: u32| (f64::from(v) * dpr).round() as u32;
+    if scaled(w).abs_diff(pw) > 1 || scaled(h).abs_diff(ph) > 1 {
+        bail!(
+            "window size changed during recording (viewport {w}x{h}@{dpr} vs screenshot {pw}x{ph}); keep the window still and retry"
+        );
+    }
+    let mut snap = snap;
+    (snap.width, snap.height, snap.dpr) = (w, h, dpr);
 
     let frames = page.execute(GetFrameTreeParams::default()).await?;
     let mut frame_urls = Vec::new();
     collect_frames(&frames.result.frame_tree, &mut frame_urls, true);
 
     let state = std::mem::take(&mut *state.lock().unwrap());
-    finalize(out, snap, state, frame_urls, png, persona)
+    finalize(out, snap, state, frame_urls, png, persona, known)
 }
 
 /// Screenshot with animations and carets frozen.
@@ -456,8 +482,11 @@ async fn handle(page: &Page, ev: &EventRequestPaused, state: &Mutex<State>) -> R
     Ok(())
 }
 
-fn learn_identity(snap: &Snapshot, st: &State, persona: &Persona) -> IdentityMap {
+fn learn_identity(snap: &Snapshot, st: &State, persona: &Persona, known: &[String]) -> IdentityMap {
     let mut ids = IdentityMap::default();
+    for k in known {
+        ids.add_given(k, persona);
+    }
     for item in &snap.storage {
         let Ok(v) = serde_json::from_str::<Value>(&item.value) else {
             continue;
@@ -472,27 +501,36 @@ fn learn_identity(snap: &Snapshot, st: &State, persona: &Persona) -> IdentityMap
     for c in &st.bearer_claims {
         ids.learn_from_msal(c, persona);
     }
-    // Graph /me style responses.
+    // Graph /me names the signed-in user outright.
     for r in &st.raws {
-        if !r.url.contains("graph.microsoft.com") || !r.url.contains("/me") {
-            continue;
+        if let Ok(u) = url::Url::parse(&r.url)
+            && u.host_str() == Some("graph.microsoft.com")
+            && u.path().trim_end_matches('/').ends_with("/me")
+            && let Some(id) = r
+                .body
+                .as_ref()
+                .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+                .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string))
+        {
+            ids.add(&id, &persona.oid);
         }
-        let Some(v) = r
-            .body
-            .as_ref()
-            .and_then(|b| serde_json::from_slice::<Value>(b).ok())
-        else {
-            continue;
-        };
-        for (k, fake) in [
-            ("id", &persona.oid),
-            ("userPrincipalName", &persona.upn),
-            ("mail", &persona.upn),
-            ("displayName", &persona.name),
-        ] {
-            if let Some(real) = v.get(k).and_then(Value::as_str) {
-                ids.add(real, fake);
-            }
+    }
+    // API JSON (Graph /me, ARM systemData, user objects). Twice, so values learned late
+    // in the walk can anchor objects seen earlier.
+    let bodies: Vec<Value> = st
+        .raws
+        .iter()
+        .filter_map(|r| r.body.as_ref())
+        .filter_map(|b| serde_json::from_slice::<Value>(b).ok())
+        .chain(
+            snap.storage
+                .iter()
+                .filter_map(|i| serde_json::from_str(&i.value).ok()),
+        )
+        .collect();
+    for _ in 0..2 {
+        for v in &bodies {
+            ids.learn_from_json(v, persona);
         }
     }
     ids
@@ -505,12 +543,20 @@ fn finalize(
     frames: Vec<String>,
     png: Vec<u8>,
     persona: Persona,
+    known: &[String],
 ) -> Result<ScanReport> {
-    let ids = learn_identity(&snap, &st, &persona);
+    let ids = learn_identity(&snap, &st, &persona, known);
     if ids.is_empty() {
         bail!(
             "could not learn the signed-in identity (no MSAL cache or bearer tokens seen); refusing to record unscrubbed data"
         );
+    }
+    for (what, fake) in [("UPN/email", &persona.upn), ("display name", &persona.name)] {
+        if !ids.has_fake(fake) {
+            bail!(
+                "could not learn the signed-in user's {what}; pass it with --identity so it can be scrubbed"
+            );
+        }
     }
     let scrubber = Scrubber::new(persona.clone(), ids);
     let check = |what: &str, ct: &str, text: &str| -> Result<()> {

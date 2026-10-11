@@ -46,9 +46,15 @@ async fn record_scrubs_and_excludes_login() {
 
     let tmp = tempdir();
     let out = tmp.join("cap");
-    let report = record_page(&page, &out, Duration::from_millis(500), Persona::default())
-        .await
-        .unwrap();
+    let report = record_page(
+        &page,
+        &out,
+        Duration::from_millis(500),
+        Persona::default(),
+        &[],
+    )
+    .await
+    .unwrap();
     session.close().await;
     fx.stop();
 

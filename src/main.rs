@@ -34,6 +34,10 @@ enum Command {
         /// Seconds without new requests before the page counts as settled.
         #[arg(long, default_value_t = 3)]
         idle: u64,
+        /// Real identity value to scrub (display name or UPN) when the app does not expose it.
+        /// Repeatable.
+        #[arg(long = "identity", value_name = "VALUE")]
+        identity: Vec<String>,
     },
     /// Fail if a capture leaks tokens or credentials.
     Scan { capture: PathBuf },
@@ -70,7 +74,8 @@ async fn main() -> Result<()> {
             out,
             cdp,
             idle,
-        } => mimesia::record::run(&cdp, &tab, &out, idle).await,
+            identity,
+        } => mimesia::record::run(&cdp, &tab, &out, idle, &identity).await,
         Command::Scan { capture } => mimesia::scan::run(&capture),
         Command::Replay { capture, headed } => mimesia::replay::run(&capture, headed).await,
         Command::Verify { capture, threshold } => mimesia::verify::run(&capture, threshold).await,

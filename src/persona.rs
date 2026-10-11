@@ -35,6 +35,18 @@ impl Persona {
         format!("{}.{}", self.oid, self.tid)
     }
 
+    /// Local part of the UPN (e.g. `demo.user`).
+    pub fn alias(&self) -> &str {
+        self.upn.split('@').next().unwrap_or(&self.upn)
+    }
+
+    /// First and last word of the display name.
+    pub fn name_parts(&self) -> (&str, &str) {
+        let mut w = self.name.split_whitespace();
+        let first = w.next().unwrap_or(&self.name);
+        (first, w.last().unwrap_or(first))
+    }
+
     pub fn claims(&self, aud: &str) -> serde_json::Value {
         json!({
             "aud": aud,

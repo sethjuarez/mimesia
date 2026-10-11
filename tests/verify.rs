@@ -14,9 +14,15 @@ async fn verify_replay_matches_recording() {
     let page = signed_in_page(&session, &format!("{}/", fx.app)).await;
     let tmp = tempdir();
     let out = tmp.join("cap");
-    record_page(&page, &out, Duration::from_millis(500), Persona::default())
-        .await
-        .unwrap();
+    record_page(
+        &page,
+        &out,
+        Duration::from_millis(500),
+        Persona::default(),
+        &[],
+    )
+    .await
+    .unwrap();
     session.close().await;
     fx.stop();
 

@@ -1,5 +1,8 @@
 //! Host and path classification.
 
+use std::sync::LazyLock;
+
+use regex::Regex;
 use url::Url;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,8 +57,29 @@ pub fn classify(url: &str) -> Class {
     if host == "graph.microsoft.com" && (path.contains("/photo/") || path.contains("/photos/")) {
         return Class::Photo;
     }
+    // App proxies for the signed-in user's photo, e.g. Foundry's
+    // `POST /nextgen/api/query?getMyProfileImageResolver`. Whole segments/keys only.
+    let query = u.query().unwrap_or_default();
+    if path
+        .split('/')
+        .chain(
+            query
+                .split('&')
+                .map(|kv| kv.split('=').next().unwrap_or_default()),
+        )
+        .any(|s| PHOTO.is_match(s))
+    {
+        return Class::Photo;
+    }
     Class::Normal
 }
+
+static PHOTO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(get)?(my|user)?profile(image|photo|picture)(resolver)?$|^(get)?(my|user)(photo|avatar|picture)(resolver)?$",
+    )
+    .unwrap()
+});
 
 #[cfg(test)]
 mod tests {
@@ -88,6 +112,17 @@ mod tests {
             classify("https://graph.microsoft.com/v1.0/me/photo/$value"),
             Class::Photo
         );
+        assert_eq!(
+            classify("https://ai.azure.com/nextgen/api/query?getMyProfileImageResolver"),
+            Class::Photo
+        );
+        for u in [
+            "https://ai.azure.com/docs/profileImageCustomization",
+            "https://ai.azure.com/api/x?profileImageEnabled=true",
+            "https://ai.azure.com/images/avatar.svg",
+        ] {
+            assert_eq!(classify(u), Class::Normal, "{u}");
+        }
     }
 
     #[test]
