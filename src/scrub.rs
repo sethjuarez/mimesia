@@ -245,20 +245,12 @@ impl IdentityMap {
         }
     }
 
-    /// Word-bounded, case-insensitive regex over the values `keep` selects.
+    /// Word-bounded, case-insensitive regex over the values `keep` selects, also matching
+    /// their percent-encoded forms.
     fn regex(&self, keep: impl Fn(&str) -> bool) -> Option<Regex> {
-        let mut reals: Vec<&str> = self.reals().filter(|r| keep(r)).collect();
-        if reals.is_empty() {
-            return None;
-        }
-        reals.sort_by_key(|r| std::cmp::Reverse(r.len()));
-        let alt = reals
-            .iter()
-            .map(|r| regex::escape(r))
-            .collect::<Vec<_>>()
-            .join("|");
+        let reals: Vec<&str> = self.reals().filter(|r| keep(r)).collect();
         Some(
-            RegexBuilder::new(&format!(r"\b(?:{alt})\b"))
+            RegexBuilder::new(&bounded(&reals)?)
                 .case_insensitive(true)
                 .build()
                 .unwrap(),
@@ -266,17 +258,8 @@ impl IdentityMap {
     }
 
     fn parts_regex(&self) -> Option<Regex> {
-        let mut parts: Vec<&str> = self.parts.iter().map(|(r, _)| r.as_str()).collect();
-        if parts.is_empty() {
-            return None;
-        }
-        parts.sort_by_key(|r| std::cmp::Reverse(r.len()));
-        let alt = parts
-            .iter()
-            .map(|r| regex::escape(r))
-            .collect::<Vec<_>>()
-            .join("|");
-        Some(Regex::new(&format!(r"\b(?:{alt})\b")).unwrap())
+        let parts: Vec<&str> = self.parts.iter().map(|(r, _)| r.as_str()).collect();
+        Some(Regex::new(&bounded(&parts)?).unwrap())
     }
 
     fn part_fake(&self, real: &str) -> &str {
@@ -292,6 +275,134 @@ impl IdentityMap {
             .find(|(r, _, _)| r.eq_ignore_ascii_case(real.trim()))
             .map(|(_, f, _)| f.as_str())
     }
+}
+
+/// An escape sequence directly before a value (`%22`, `\u0022`, `\x22`). Its last hex
+/// digit is a word character, so a plain `\b` would miss e.g. `%22<guid>`.
+const ESC_PREFIX: &str = r"%25[0-9A-Fa-f]{2}|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}|\\x[0-9A-Fa-f]{2}";
+
+/// `(?P<pre>escape)?(?P<v>values)`, longest first, with once- and twice-percent-encoded
+/// variants.
+/// Boundaries are checked by [`id_matches`], since `\b` treats `_` and hex escapes as words.
+fn bounded(values: &[&str]) -> Option<String> {
+    let mut all: Vec<String> = Vec::new();
+    for v in values {
+        let once = [pct_encode(v, false), pct_encode(v, true)];
+        let twice = once
+            .iter()
+            .map(|x| pct_encode(x, false))
+            .collect::<Vec<_>>();
+        for x in std::iter::once(v.to_string()).chain(once).chain(twice) {
+            if !all.contains(&x) {
+                all.push(x);
+            }
+        }
+    }
+    if all.is_empty() {
+        return None;
+    }
+    all.sort_by_key(|r| std::cmp::Reverse(r.len()));
+    let alt = all
+        .iter()
+        .map(|r| regex::escape(r))
+        .collect::<Vec<_>>()
+        .join("|");
+    Some(format!(r"(?P<pre>{ESC_PREFIX})?(?P<v>{alt})"))
+}
+
+fn is_word(c: Option<char>) -> bool {
+    c.is_some_and(char::is_alphanumeric)
+}
+
+/// Matches of a [`bounded`] regex whose value is not glued to a letter or digit
+/// (an escape prefix counts as a boundary).
+fn id_matches<'a>(re: &'a Regex, s: &'a str) -> impl Iterator<Item = Captures<'a>> + 'a {
+    let mut pos = 0;
+    std::iter::from_fn(move || {
+        while pos <= s.len() {
+            let c = re.captures_at(s, pos)?;
+            let v = c.name("v").unwrap();
+            let before = s[..v.start()].chars().next_back();
+            let after = s[v.end()..].chars().next();
+            if (c.name("pre").is_some() || !is_word(before)) && !is_word(after) {
+                pos = c.get(0).unwrap().end().max(pos + 1);
+                return Some(c);
+            }
+            pos = v.start() + s[v.start()..].chars().next().map_or(1, char::len_utf8);
+        }
+        None
+    })
+}
+
+fn replace_ids(re: &Regex, s: &str, f: impl Fn(&Captures) -> String) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last = 0;
+    for c in id_matches(re, s) {
+        let m = c.get(0).unwrap();
+        out.push_str(&s[last..m.start()]);
+        out.push_str(&f(&c));
+        last = m.end();
+    }
+    out.push_str(&s[last..]);
+    out
+}
+
+/// Percent-encode everything but RFC 3986 unreserved characters; `plus` writes space as `+`.
+fn pct_encode(s: &str, plus: bool) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' if plus => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Decode `%XX` and `+`; returns the decoded text and whether it was encoded with `+`.
+fn pct_decode(s: &str) -> Option<(String, bool)> {
+    if !s.contains('%') && !s.contains('+') {
+        return None;
+    }
+    let b = s.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'%' if i + 2 < b.len() => {
+                out.push(u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).ok()?, 16).ok()?);
+                i += 3;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            c => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    Some((String::from_utf8(out).ok()?, s.contains('+')))
+}
+
+/// Replace one regex match from [`bounded`], keeping its escape prefix and encoding depth.
+fn swap(c: &Captures, fake: impl Fn(&str) -> Option<String>) -> String {
+    let pre = c.name("pre").map_or("", |m| m.as_str());
+    let v = &c["v"];
+    let out = fake(v)
+        .or_else(|| {
+            let (once, plus) = pct_decode(v)?;
+            fake(&once).map(|f| pct_encode(&f, plus)).or_else(|| {
+                let (twice, plus) = pct_decode(&once)?;
+                fake(&twice).map(|f| pct_encode(&pct_encode(&f, plus), false))
+            })
+        })
+        .unwrap_or_else(|| REDACTED.to_string());
+    format!("{pre}{out}")
 }
 
 /// Values that cannot be a code identifier or keyword (GUIDs, UPNs, "First Last").
@@ -369,11 +480,9 @@ impl Scrubber {
 
     fn ids_with(&self, re: &Option<Regex>, s: String) -> String {
         match re {
-            Some(re) => re
-                .replace_all(&s, |c: &Captures| {
-                    self.ids.fake_for(&c[0]).unwrap_or(REDACTED).to_string()
-                })
-                .into_owned(),
+            Some(re) => replace_ids(re, &s, |c| {
+                swap(c, |v| self.ids.fake_for(v).map(str::to_string))
+            }),
             None => s,
         }
     }
@@ -383,9 +492,12 @@ impl Scrubber {
         let s = self.credentials(s);
         // Name words first, so a surname that equals the alias still reads as a name.
         let s = match &self.part_re {
-            Some(re) => re
-                .replace_all(&s, |c: &Captures| self.ids.part_fake(&c[0]).to_string())
-                .into_owned(),
+            Some(re) => replace_ids(re, &s, |c| {
+                swap(c, |v| {
+                    let f = self.ids.part_fake(v);
+                    (f != REDACTED).then(|| f.to_string())
+                })
+            }),
             None => s,
         };
         self.ids_with(&self.text_re, s)
@@ -395,7 +507,7 @@ impl Scrubber {
         [&self.text_re, &self.part_re]
             .into_iter()
             .flatten()
-            .any(|r| r.is_match(s))
+            .any(|r| id_matches(r, s).next().is_some())
     }
 
     /// Scrub a body by content type. Scripts/styles only get distinctive identity values
@@ -447,7 +559,10 @@ impl Scrubber {
     /// Identity values still present after scrubbing, judged the same way `body` scrubs.
     pub fn identity_left(&self, content_type: &str, s: &str) -> bool {
         if is_script_or_style(content_type) {
-            return self.code_re.as_ref().is_some_and(|r| r.is_match(s));
+            return self
+                .code_re
+                .as_ref()
+                .is_some_and(|r| id_matches(r, s).next().is_some());
         }
         if content_type.contains("json")
             && let Ok(v) = serde_json::from_str::<Value>(s)
@@ -475,7 +590,12 @@ impl Scrubber {
         self.ids.reals().filter(|r| distinctive(r)).any(|r| {
             let lower = r.to_ascii_lowercase();
             let utf16: Vec<u8> = lower.encode_utf16().flat_map(u16::to_le_bytes).collect();
-            contains(&hay, lower.as_bytes()) || contains(&hay, &utf16)
+            let pct = pct_encode(&lower, false).to_ascii_lowercase();
+            let pct2 = pct_encode(&pct, false).to_ascii_lowercase();
+            contains(&hay, lower.as_bytes())
+                || contains(&hay, &utf16)
+                || contains(&hay, pct.as_bytes())
+                || contains(&hay, pct2.as_bytes())
         })
     }
 
@@ -605,6 +725,42 @@ mod tests {
             "Welcome, Demo User / Hi Demo / demo.user@contoso.com / azureAI.demo.user.x"
         );
         assert_eq!(s.text("svc@fabrikam.com proj-1"), "svc@fabrikam.com proj-1");
+    }
+
+    #[test]
+    fn encoded_and_glued_ids_scrubbed() {
+        let p = Persona::default();
+        let mut ids = IdentityMap::default();
+        ids.add("3f6a1c2e-9b4d-4e1a-8c7f-2d5e6b7a8c90", &p.tid);
+        ids.add_upn("real.person@fabrikam.com", &p);
+        ids.add_name("Real Person", &p);
+        let s = Scrubber::new(p.clone(), ids);
+        let html = "x=%7B%22tid%22%3A%223f6a1c2e-9b4d-4e1a-8c7f-2d5e6b7a8c90%22%7D \
+                    \\u00223f6a1c2e-9b4d-4e1a-8c7f-2d5e6b7a8c90 \
+                    u=real.person%40fabrikam.com n=Real+Person m=Real%20Person";
+        let out = s.text(html);
+        assert!(s.identity_left("text/html", html));
+        assert!(!s.identity_left("text/html", &out), "{out}");
+        assert!(out.contains(&format!("%22{}%22", p.tid)), "{out}");
+        assert!(out.contains(&pct_encode(&p.upn, false)), "{out}");
+        assert!(out.contains(&pct_encode(&p.name, true)), "{out}");
+        assert_eq!(
+            s.text("user.3f6a1c2e-9b4d-4e1a-8c7f-2d5e6b7a8c90_AiStudio"),
+            format!("user.{}_AiStudio", p.tid)
+        );
+        assert!(s.bytes_have_identity(b"real.person%40fabrikam.com"));
+        // Double-encoded (a URL inside a URL).
+        let dbl = "r=%25223f6a1c2e-9b4d-4e1a-8c7f-2d5e6b7a8c90%2522&u=real.person%2540fabrikam.com";
+        let out = s.text(dbl);
+        assert!(!s.identity_left("text/html", &out), "{out}");
+        assert!(out.contains(&format!("%2522{}%2522", p.tid)), "{out}");
+        assert!(
+            out.contains(&pct_encode(&pct_encode(&p.upn, false), false)),
+            "{out}"
+        );
+        assert!(s.bytes_have_identity(b"real.person%2540fabrikam.com"));
+        // Still never matches inside a longer word.
+        assert_eq!(s.text("RealPersonal"), "RealPersonal");
     }
 
     #[test]
