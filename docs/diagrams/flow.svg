@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 330" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="13">
+  <title>Record, replay, verify</title>
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#424242"/>
+    </marker>
+  </defs>
+  <rect width="760" height="330" fill="#ffffff"/>
+
+  <!-- Live -->
+  <rect x="20" y="40" width="170" height="110" rx="8" fill="#f5f5f5" stroke="#616161"/>
+  <text x="105" y="64" text-anchor="middle" font-weight="600">Signed-in Edge</text>
+  <text x="105" y="86" text-anchor="middle" font-size="12">live app</text>
+  <text x="105" y="104" text-anchor="middle" font-size="12">CDP :9333</text>
+  <text x="105" y="134" text-anchor="middle" font-size="11" fill="#c50f1f">identity hosts excluded</text>
+
+  <line x1="190" y1="95" x2="260" y2="95" stroke="#424242" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="225" y="86" text-anchor="middle" font-size="12">record</text>
+
+  <!-- Capture -->
+  <rect x="262" y="30" width="220" height="130" rx="8" fill="#e5f1fb" stroke="#0f6cbd"/>
+  <text x="372" y="54" text-anchor="middle" font-weight="600" fill="#0a4a85">Capture (gitignored)</text>
+  <text x="280" y="78" font-size="12">requests.jsonl · blobs/&lt;sha256&gt;</text>
+  <text x="280" y="98" font-size="12">inventory.json · record.png</text>
+  <text x="280" y="118" font-size="12">scrubbed: tokens, cookies,</text>
+  <text x="280" y="136" font-size="12">tenant IDs → persona</text>
+
+  <line x1="372" y1="160" x2="372" y2="205" stroke="#424242" stroke-width="1.5" marker-end="url(#a)"/>
+  <text x="382" y="188" font-size="12">scan gate</text>
+
+  <!-- Replay -->
+  <rect x="262" y="207" width="250" height="100" rx="8" fill="#e6f4ea" stroke="#107c10"/>
+  <text x="387" y="231" text-anchor="middle" font-weight="600" fill="#0b5a0b">Replay (offline)</text>
+  <text x="280" y="254" font-size="12">fresh headless browser</text>
+  <text x="280" y="273" font-size="12">Fetch.fulfillRequest from capture</text>
+  <text x="280" y="292" font-size="12">bootstrap: MSAL seed, clock, telemetry</text>
+
+  <line x1="512" y1="257" x2="550" y2="257" stroke="#424242" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Verify -->
+  <rect x="552" y="190" width="196" height="117" rx="8" fill="#fff4ce" stroke="#c19c00"/>
+  <text x="647" y="214" text-anchor="middle" font-weight="600" fill="#6b5400">Verify</text>
+  <text x="566" y="238" font-size="12">replay.png vs record.png</text>
+  <text x="566" y="258" font-size="12">diff.png + score</text>
+  <text x="566" y="278" font-size="12">miss report</text>
+  <text x="566" y="296" font-size="11" fill="#616161">(unanswered requests)</text>
+
+  <path d="M482,95 C620,95 647,120 647,188" fill="none" stroke="#424242" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#a)"/>
+  <text x="560" y="88" font-size="12">record.png</text>
+</svg>

@@ -1,0 +1,18 @@
+# Build
+/target/
+
+# Captures: raw recordings may hold tenant data. Never commit.
+**/captures/
+**/recordings/
+*.har
+*.capture/
+
+# Secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

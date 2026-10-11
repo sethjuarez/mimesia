@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="14">
+  <title>Mimesia layers</title>
+  <rect width="720" height="360" fill="#ffffff"/>
+  <text x="24" y="32" font-size="18" font-weight="600" fill="#1b1b1b">Four layers, stacked</text>
+  <text x="520" y="32" font-size="12" fill="#616161">on site change</text>
+
+  <!-- Projections -->
+  <rect x="24" y="52" width="480" height="62" rx="8" fill="#f3e8fd" stroke="#8a3ffc"/>
+  <text x="40" y="78" font-weight="600" fill="#5c1fb3">Projections</text>
+  <text x="40" y="99" font-size="12" fill="#333">dark flags · injected Fluent v9 components · invented APIs</text>
+  <text x="520" y="88" font-size="12" fill="#333">anchor + visual check</text>
+
+  <!-- Scenario -->
+  <rect x="24" y="124" width="480" height="62" rx="8" fill="#e6f4ea" stroke="#107c10"/>
+  <text x="40" y="150" font-weight="600" fill="#0b5a0b">Scenario</text>
+  <text x="40" y="171" font-size="12" fill="#333">demo data as patches on baseline · persona</text>
+  <text x="520" y="160" font-size="12" fill="#333">rebase patches</text>
+
+  <!-- Contract -->
+  <rect x="24" y="196" width="480" height="62" rx="8" fill="#e5f1fb" stroke="#0f6cbd"/>
+  <text x="40" y="222" font-weight="600" fill="#0a4a85">Contract</text>
+  <text x="40" y="243" font-size="12" fill="#333">baseline API responses · inferred JSON schemas</text>
+  <text x="520" y="232" font-size="12" fill="#333">re-record, schema diff</text>
+
+  <!-- Shell -->
+  <rect x="24" y="268" width="480" height="62" rx="8" fill="#f5f5f5" stroke="#616161"/>
+  <text x="40" y="294" font-weight="600" fill="#242424">Shell</text>
+  <text x="40" y="315" font-size="12" fill="#333">HTML · JS · CSS · fonts, byte-identical, content-addressed</text>
+  <text x="520" y="304" font-size="12" fill="#333">recapture wholesale</text>
+
+  <!-- edited-by bracket -->
+  <line x1="690" y1="56" x2="690" y2="182" stroke="#107c10" stroke-width="3"/>
+  <text x="682" y="124" font-size="12" fill="#107c10" text-anchor="end" transform="rotate(-90 682 124)">demoer edits</text>
+  <line x1="690" y1="200" x2="690" y2="326" stroke="#616161" stroke-width="3"/>
+  <text x="682" y="270" font-size="12" fill="#616161" text-anchor="end" transform="rotate(-90 682 270)">captured</text>
+</svg>
