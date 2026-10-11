@@ -89,6 +89,7 @@ CDP replay fails closed:
 | Identity host / OAuth path | `auth` stub (OIDC metadata, token with persona JWTs, authorize → code redirect) |
 | Telemetry | 204 |
 | Recorded | fixture: exact key, else loose key (GET/HEAD only); repeats served in order |
+| Recorded RPC call (non-GET with a query, e.g. `/api/query?getFooResolver`) | same method + URL + query, body ignored |
 | Unrecorded preflight | synthesized CORS 204 |
 | Unrecorded same-origin subframe | blank page (MSAL redirect targets) |
 | Anything else | blocked, reported as a **miss**; `replay` exits non-zero |
@@ -112,9 +113,25 @@ Arming after load is not enough on its own: reloads can trigger silent renewal. 
 | Record | never persist `Authorization`, `Cookie`, `Set-Cookie`, or `x-ms-*token*` headers |
 | Record | refuse an `--out` path that Git would track |
 | Scrub | JWTs in bodies, SAS `sig=`, session IDs, real UPN/oid/tenant ID → persona |
+| Scrub | display name, name parts (case-sensitive, text/JSON only), UPN, alias → persona |
+| Gate | `record` fails unless the UPN and display name come from a **trusted** source |
 | Gate | capture is marked unscanned; `replay` refuses it until `scan` passes |
 | Scenario | Graph `/me`, photo, tenant, subscriptions come from the persona |
 | Replay | stub residual identity calls: OpenID config, token, silent-renew iframe |
+
+### Learning who the user is
+
+Scrubbing needs the real values first. Cookie-session BFFs and encrypted MSAL caches hide them, so sources are ranked:
+
+| Source | Trust |
+|---|---|
+| `--identity` values (`@` → UPN, multi-word → name, one word → alias) | trusted |
+| MSAL storage / id_token claims, bearer token claims, Graph `/me` | trusted |
+| JSON objects anchored by a trusted oid/UPN | trusted |
+| ARM `systemData.createdBy` / `lastModifiedBy` (may be a colleague) | weak: scrubbed, never satisfies the gate |
+| Photo endpoints (Graph `/photo`, `*ProfileImage*`, `*MyPhoto*` segments/keys) | recorded as 404 → initials |
+
+Same-origin telemetry (`*/clientTelemetry`, `*-telemetry`, `*/v2/track`) is dropped like third-party telemetry.
 
 ### Fake session (hypothesis, per app)
 

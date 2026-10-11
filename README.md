@@ -37,7 +37,7 @@ Spike 01: the CLI records one page over CDP, replays it offline, and diffs scree
 
 # 2. Find the tab, record, check, verify (replay --headed to click around).
 cargo run -- tabs
-cargo run -- record ai.azure.com --out captures/foundry
+cargo run -- record ai.azure.com --out captures/foundry --identity "Your Name" --identity you@contoso.com
 cargo run -- scan captures/foundry
 cargo run -- verify captures/foundry
 ```
@@ -45,5 +45,6 @@ cargo run -- verify captures/foundry
 ## Safety
 
 - Sign-in is excluded and recording fails closed: identity traffic is dropped, credential headers are never stored, and a capture is unusable until `scan` passes.
+- `record` fails unless it knows your display name and UPN. Apps with cookie sessions or encrypted MSAL caches don't expose them, so pass `--identity` (repeatable; also accepts aliases/handles).
 - Replay is offline: unmatched requests fail and are reported; anything that slips past interception hits a reject proxy.
 - `record.png` and `verify/replay.png` are real screenshots. `captures/` is gitignored, and `record` refuses an output path Git would track. Never commit raw captures.
