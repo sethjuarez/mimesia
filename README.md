@@ -19,7 +19,7 @@ See [docs/DESIGN.md](docs/DESIGN.md).
 
 ## Status
 
-Spike 01 in progress: a Rust CLI that records one page over CDP, replays it offline, and diffs screenshots. Commands below are **planned**; see [docs/DESIGN.md](docs/DESIGN.md#spike-01-risks).
+Spike 01: the CLI records one page over CDP, replays it offline, and diffs screenshots. Proven end to end on a local fixture app; the live Foundry run is next ([runbook](docs/spikes/01-foundry.md)).
 
 | Command | Does |
 |---|---|
@@ -29,13 +29,14 @@ Spike 01 in progress: a Rust CLI that records one page over CDP, replays it offl
 | `mimesia replay` | serve the capture offline in a fresh browser |
 | `mimesia verify` | replay, screenshot, pixel-diff vs recording |
 
-## Quick start (planned)
+## Quick start
 
 ```powershell
 # 1. Start Edge with a debug port and a throwaway profile, then sign in.
-msedge --remote-debugging-port=9333 --user-data-dir=$env:TEMP\mimesia-edge
+& "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9333 --user-data-dir=$env:TEMP\mimesia-edge
 
-# 2. Record, check, verify.
+# 2. Find the tab, record, check, verify (replay --headed to click around).
+cargo run -- tabs
 cargo run -- record ai.azure.com --out captures/foundry
 cargo run -- scan captures/foundry
 cargo run -- verify captures/foundry
@@ -44,4 +45,5 @@ cargo run -- verify captures/foundry
 ## Safety
 
 - Sign-in is excluded and recording fails closed: identity traffic is dropped, credential headers are never stored, and a capture is unusable until `scan` passes.
-- `captures/` is gitignored, and `record` refuses an output path Git would track. Never commit raw captures.
+- Replay is offline: unmatched requests fail and are reported; anything that slips past interception hits a reject proxy.
+- `record.png` and `verify/replay.png` are real screenshots. `captures/` is gitignored, and `record` refuses an output path Git would track. Never commit raw captures.
