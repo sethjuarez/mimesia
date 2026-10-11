@@ -98,6 +98,8 @@ Bootstrap also parks WebSocket/EventSource (stay connecting), blocks service-wor
 
 Known gaps: popups/new tabs are not intercepted; bodies CDP omits from `postDataEntries` hash as empty; browser settings are not OS-level network isolation.
 
+`verify` diffs replay vs `record.png` with pixelmatch's YIQ metric (no anti-alias detection yet) and writes a mask-only `diff.png`. `record.png` shows the real signed-in user, so captures stay local.
+
 ## Login is not recorded
 
 Arming after load is not enough on its own: reloads can trigger silent renewal. Recording **fails closed**.

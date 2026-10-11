@@ -118,6 +118,7 @@ pub struct Replay {
     state: Arc<Mutex<State>>,
     listener: tokio::task::JoinHandle<()>,
     proxy: tokio::task::JoinHandle<()>,
+    escaped: Arc<Mutex<Vec<String>>>,
 }
 
 impl Replay {
@@ -230,24 +231,13 @@ impl Replay {
         page.execute(NavigateParams::new(manifest.url.clone()))
             .await
             .context("navigate")?;
-        // Escapes are reported through the shared stats.
-        let st = state.clone();
-        let proxy = tokio::spawn(async move {
-            let _guard = proxy;
-            loop {
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                let mut e = escaped.lock().unwrap();
-                if !e.is_empty() {
-                    st.lock().unwrap().stats.escaped.append(&mut e);
-                }
-            }
-        });
         Ok(Self {
             session,
             page,
             state,
             listener,
             proxy,
+            escaped,
         })
     }
 
@@ -290,7 +280,9 @@ impl Replay {
     }
 
     pub fn stats(&self) -> Stats {
-        self.state.lock().unwrap().stats.clone()
+        let mut s = self.state.lock().unwrap().stats.clone();
+        s.escaped = self.escaped.lock().unwrap().clone();
+        s
     }
 
     pub async fn close(self) {
@@ -412,6 +404,12 @@ async fn reject_proxy(
     let addr = listener.local_addr()?;
     let task = tokio::spawn(async move {
         while let Ok((mut sock, _)) = listener.accept().await {
+            // Count the escape on accept, then fill in what it was.
+            let slot = {
+                let mut e = escaped.lock().unwrap();
+                e.push("(connection)".into());
+                e.len() - 1
+            };
             let escaped = escaped.clone();
             tokio::spawn(async move {
                 let mut buf = [0u8; 1024];
@@ -422,7 +420,7 @@ async fn reject_proxy(
                     .unwrap_or(0);
                 let head = String::from_utf8_lossy(&buf[..n]);
                 let line = head.lines().next().unwrap_or("(no request line)");
-                escaped.lock().unwrap().push(line.to_string());
+                escaped.lock().unwrap()[slot] = line.to_string();
                 // Dropping the socket refuses the request.
             });
         }
