@@ -219,7 +219,7 @@ impl Replay {
             .await?;
         page.execute(SetCacheDisabledParams::new(true)).await?;
         page.execute(AddScriptToEvaluateOnNewDocumentParams::new(bootstrap(
-            &manifest, headed,
+            &manifest, headed, false,
         )?))
         .await?;
         if !manifest.user_agent.is_empty() {
@@ -495,7 +495,7 @@ impl Reply {
 }
 
 /// A loopback proxy that refuses everything and records what tried to get out.
-async fn reject_proxy(
+pub(crate) async fn reject_proxy(
     escaped: Arc<Mutex<Vec<String>>>,
 ) -> Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -526,11 +526,13 @@ async fn reject_proxy(
     Ok((addr, task))
 }
 
-/// Script injected into every document before page scripts run.
-fn bootstrap(m: &Manifest, badge: bool) -> Result<String> {
+/// Script injected into every document before page scripts run. `any_origin` seeds storage
+/// wherever the page is served (static exports run on their host's origin, not the recorded one).
+pub(crate) fn bootstrap(m: &Manifest, badge: bool, any_origin: bool) -> Result<String> {
     let cfg = json!({
         "now": m.captured_at_ms,
         "origin": m.origin,
+        "anyOrigin": any_origin,
         "storage": m.storage,
         "badge": badge,
     });
@@ -559,7 +561,7 @@ const BOOTSTRAP: &str = r#"(() => {
 
   // Fake session: seed storage once, on the recorded origin only.
   try {
-    if (location.origin === cfg.origin && !sessionStorage.getItem('__mimesia_seeded')) {
+    if ((cfg.anyOrigin || location.origin === cfg.origin) && !sessionStorage.getItem('__mimesia_seeded')) {
       for (const { area, key, value } of cfg.storage) {
         try { window[area].setItem(key, value); } catch (_) {}
       }

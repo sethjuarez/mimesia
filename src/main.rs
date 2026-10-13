@@ -59,6 +59,25 @@ enum Command {
         #[arg(long, default_value_t = 0.01)]
         threshold: f64,
     },
+    /// Write a capture as a static site: shell files plus an in-page data shim.
+    Export {
+        capture: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Serve an exported site locally, like a plain static host.
+    Serve {
+        site: PathBuf,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
+    /// Load an exported site offline, screenshot, and pixel-diff against the recording.
+    VerifyExport {
+        capture: PathBuf,
+        site: PathBuf,
+        #[arg(long, default_value_t = 0.01)]
+        threshold: f64,
+    },
 }
 
 #[tokio::main]
@@ -84,5 +103,12 @@ async fn main() -> Result<()> {
         Command::Scan { capture } => mimesia::scan::run(&capture),
         Command::Replay { capture, headed } => mimesia::replay::run(&capture, headed).await,
         Command::Verify { capture, threshold } => mimesia::verify::run(&capture, threshold).await,
+        Command::Export { capture, out } => mimesia::export::run(&capture, &out),
+        Command::Serve { site, port } => mimesia::export::run_serve(&site, port).await,
+        Command::VerifyExport {
+            capture,
+            site,
+            threshold,
+        } => mimesia::export::run_verify(&capture, &site, threshold).await,
     }
 }

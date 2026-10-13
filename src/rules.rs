@@ -26,7 +26,7 @@ const IDENTITY_HOSTS: &[&str] = &[
 const IDENTITY_SUFFIXES: &[&str] = &[".msauth.net", ".msftauth.net"];
 const IDENTITY_PATHS: &[&str] = &["/oauth2/", "/.well-known/openid-configuration"];
 
-const TELEMETRY_SUFFIXES: &[&str] = &[
+pub const TELEMETRY_SUFFIXES: &[&str] = &[
     "events.data.microsoft.com",
     "applicationinsights.azure.com",
     "dc.services.visualstudio.com",

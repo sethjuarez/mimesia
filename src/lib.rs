@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod cdp;
 pub mod crawl;
+pub mod export;
 pub mod matchkey;
 pub mod persona;
 pub mod record;
