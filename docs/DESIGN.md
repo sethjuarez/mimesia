@@ -68,7 +68,7 @@ Minified bundle diffs are useless. Diff at meaningful levels:
 | Mode | Use |
 |---|---|
 | CDP `Fetch.fulfillRequest` | spike, in-tool preview |
-| Static site + service worker | publish (e.g. Azure Static Web Apps behind real auth) |
+| Static export + in-page shim | publish (e.g. Azure Static Web Apps behind real auth); see [spike 03](spikes/03-static-export.md) |
 
 Both inject one small **bootstrap** script into the page:
 
@@ -77,10 +77,10 @@ Both inject one small **bootstrap** script into the page:
 | Auth | seed fake MSAL session |
 | Clock | pin `Date` to capture time |
 | Telemetry | block |
-| Hosts | rewrite absolute hosts (service-worker mode) |
+| Data (export) | answer fetch/XHR from the recorded index; only exported shell files reach the host |
 | Projections | mount injected components |
 
-Service-worker publish must handle scope, CSP, and cross-origin requests. Out of scope for spike 01.
+The static export replaces the earlier service-worker plan: shell files sit at their recorded paths, and data is answered in-page. Serve it at a host containing the recorded one (`<host>.localhost` locally) so apps that check their hostname keep working; deep links hydrate on the recorded route, then hand off to the router.
 
 CDP replay fails closed:
 
