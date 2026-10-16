@@ -520,7 +520,7 @@ pub async fn verify_site(capture: &Path, site: &Path, threshold: f64) -> Result<
     fs::create_dir_all(&out)?;
     fs::write(out.join("site.png"), &shot)?;
     diff.save_with_format(out.join("diff.png"), ImageFormat::Png)?;
-    let escaped = escaped.lock().unwrap().clone();
+    let escaped = crate::replay::live_escapes(&escaped).await;
     let report = SiteReport {
         diff_ratio,
         threshold,

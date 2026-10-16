@@ -209,7 +209,7 @@ impl Replay {
                 "--proxy-bypass-list=<-loopback>".into(),
                 "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".into(),
                 // Keep cross-origin iframes in-process so their requests are intercepted too.
-                "--disable-features=IsolateOrigins,site-per-process".into(),
+                "--disable-site-isolation-trials".into(),
             ],
         })
         .await?;
@@ -345,9 +345,9 @@ impl Replay {
         Ok(())
     }
 
-    pub fn stats(&self) -> Stats {
+    pub async fn stats(&self) -> Stats {
         let mut s = self.state.lock().unwrap().stats.clone();
-        s.escaped = self.escaped.lock().unwrap().clone();
+        s.escaped = live_escapes(&self.escaped).await;
         s
     }
 
@@ -494,6 +494,8 @@ impl Reply {
     }
 }
 
+const PENDING: &str = "(connection)";
+
 /// A loopback proxy that refuses everything and records what tried to get out.
 pub(crate) async fn reject_proxy(
     escaped: Arc<Mutex<Vec<String>>>,
@@ -505,7 +507,7 @@ pub(crate) async fn reject_proxy(
             // Count the escape on accept, then fill in what it was.
             let slot = {
                 let mut e = escaped.lock().unwrap();
-                e.push("(connection)".into());
+                e.push(PENDING.into());
                 e.len() - 1
             };
             let escaped = escaped.clone();
@@ -517,13 +519,63 @@ pub(crate) async fn reject_proxy(
                     .and_then(|r| r.ok())
                     .unwrap_or(0);
                 let head = String::from_utf8_lossy(&buf[..n]);
-                let line = head.lines().next().unwrap_or("(no request line)");
-                escaped.lock().unwrap()[slot] = line.to_string();
+                let line = head.lines().next().unwrap_or_default();
+                // Idle preconnects asked for nothing, and browser housekeeping (new-tab page,
+                // updater) is refused but not an app leak.
+                escaped.lock().unwrap()[slot] = if line.is_empty() || browser_service(line) {
+                    String::new()
+                } else {
+                    line.to_string()
+                };
                 // Dropping the socket refuses the request.
             });
         }
     });
     Ok((addr, task))
+}
+
+/// Escapes worth reporting (browser housekeeping is blanked out by the proxy).
+pub(crate) async fn live_escapes(escaped: &Mutex<Vec<String>>) -> Vec<String> {
+    // Let connections accepted just now finish reading their request line.
+    for _ in 0..25 {
+        if !escaped.lock().unwrap().iter().any(|e| e == PENDING) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    escaped
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| !e.is_empty())
+        .cloned()
+        .collect()
+}
+
+/// The proxied host of a request line (`CONNECT h:443 ...` or `GET http://h/... ...`).
+fn proxied_host(line: &str) -> Option<&str> {
+    let target = line.split_whitespace().nth(1)?;
+    let rest = target.split_once("://").map_or(target, |(_, r)| r);
+    let authority = rest.split('/').next()?;
+    Some(authority.rsplit_once(':').map_or(authority, |(h, _)| h))
+}
+
+/// Edge/Chrome's own background services, not the replayed app.
+fn browser_service(line: &str) -> bool {
+    const HOSTS: &[&str] = &[
+        "edge.microsoft.com",
+        "msn.com",
+        "bing.com",
+        "edge.skype.com",
+        "clients2.google.com",
+        "update.googleapis.com",
+        "gvt1.com",
+    ];
+    proxied_host(line).is_some_and(|h| {
+        HOSTS
+            .iter()
+            .any(|s| h == *s || h.ends_with(&format!(".{s}")))
+    })
 }
 
 /// Script injected into every document before page scripts run. `any_origin` seeds storage
@@ -632,7 +684,7 @@ pub async fn run(capture: &Path, headed: bool) -> Result<()> {
         );
         tokio::signal::ctrl_c().await?;
     }
-    let s = replay.stats();
+    let s = replay.stats().await;
     println!(
         "replayed: {} hits ({} near), {} identity stubbed, {} telemetry stubbed, {} preflights, {} blank frames, {} misses",
         s.hits,
@@ -667,6 +719,17 @@ pub async fn run(capture: &Path, headed: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn browser_service_traffic_is_not_an_escape() {
+        assert!(super::browser_service("CONNECT ntp.msn.com:443 HTTP/1.1"));
+        assert!(super::browser_service(
+            "GET http://edge.microsoft.com/browsernetworktime/time/1/current HTTP/1.1"
+        ));
+        assert!(!super::browser_service("CONNECT ai.azure.com:443 HTTP/1.1"));
+        assert!(!super::browser_service("CONNECT notbing.com:443 HTTP/1.1"));
+        assert!(!super::browser_service("(no request line)"));
+    }
+
     use super::*;
 
     fn entry(method: &str, url: &str, body: &str) -> Entry {

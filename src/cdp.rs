@@ -53,13 +53,18 @@ impl Session {
                 is_landscape: false,
                 has_touch: false,
             })
-            .args(opts.args);
+            // chromiumoxide adds the `--` itself; a second one makes Chromium ignore the flag.
+            .args(
+                opts.args
+                    .iter()
+                    .map(|a| a.trim_start_matches("--").to_string()),
+            );
         b = if opts.headed {
             b.with_head()
         } else {
             // Not `new_headless_mode()`: it also hides scrollbars, which shifts layout
             // against recordings taken in a normal (scrollbar-showing) tab.
-            b.with_head().arg("--headless=new").arg("--mute-audio")
+            b.with_head().arg("headless=new").arg("mute-audio")
         };
         if opts.intercept {
             b = b.enable_request_intercept().disable_cache();

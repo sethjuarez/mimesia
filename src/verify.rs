@@ -52,7 +52,7 @@ pub async fn verify(capture: &Path, threshold: f64) -> Result<Report> {
         still_screenshot(&replay.page).await
     }
     .await;
-    let stats = replay.stats();
+    let stats = replay.stats().await;
     replay.close().await;
     let shot = shot?;
     let replayed = image::load_from_memory_with_format(&shot, ImageFormat::Png)?.to_rgba8();

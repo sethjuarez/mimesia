@@ -52,7 +52,7 @@ async fn replay_runs_offline_with_fake_session() {
     let items = text(page, "String(document.querySelectorAll('li').length)").await;
     let lazy = text(page, "document.querySelector('#lazy')?.textContent || ''").await;
     let year = text(page, "String(new Date().getFullYear())").await;
-    let stats = replay.stats();
+    let stats = replay.stats().await;
     replay.close().await;
 
     assert_eq!(ready, "1", "app never became ready; stats {stats:#?}");
