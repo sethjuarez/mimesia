@@ -567,7 +567,8 @@ fn browser_service(line: &str) -> bool {
         "msn.com",
         "bing.com",
         "edge.skype.com",
-        "clients2.google.com",
+        "google.com",
+        "www.gstatic.com",
         "update.googleapis.com",
         "gvt1.com",
     ];
@@ -727,6 +728,12 @@ mod tests {
         ));
         assert!(!super::browser_service("CONNECT ai.azure.com:443 HTTP/1.1"));
         assert!(!super::browser_service("CONNECT notbing.com:443 HTTP/1.1"));
+        assert!(super::browser_service(
+            "CONNECT accounts.google.com:443 HTTP/1.1"
+        ));
+        assert!(!super::browser_service(
+            "CONNECT fonts.gstatic.com:443 HTTP/1.1"
+        ));
         assert!(!super::browser_service("(no request line)"));
     }
 
