@@ -57,3 +57,7 @@ cargo run -- serve captures/foundry-site
 - Exports contain recorded tenant data; keep them under `captures/` until the scenario layer replaces it.
 - Replay is offline: unmatched requests fail and are reported; anything that slips past interception hits a reject proxy.
 - `record.png` and `verify/replay.png` are real screenshots. `captures/` is gitignored, and `record` refuses an output path Git would track. Never commit raw captures.
+
+## License
+
+[MIT](LICENSE)

@@ -1,5 +1,6 @@
 [package]
 name = "mimesia"
+license = "MIT"
 version = "0.1.0"
 edition = "2024"
 description = "Record, replay, and verify web app shells for demos"
